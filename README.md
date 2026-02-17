@@ -14,13 +14,13 @@ npm i -g acpx
 
 ## Agent prerequisites
 
-Install at least one ACP-compatible agent adapter:
+`acpx` auto-downloads ACP adapters with `npx` on first use. You do not need to install adapter packages manually.
 
-```bash
-npm install -g @zed-industries/codex-acp
-npm install -g @zed-industries/claude-agent-acp
-npm install -g @google/gemini-cli
-```
+The only prerequisite is the underlying coding agent you want to use:
+
+- `acpx codex` -> Codex CLI: https://codex.openai.com
+- `acpx claude` -> Claude Code: https://claude.ai/code
+- `acpx gemini` -> Gemini CLI: https://github.com/google/gemini-cli
 
 ## Core usage
 
@@ -57,4 +57,4 @@ acpx --agent ./my-custom-acp-server 'do something'
 
 ## License
 
-Apache-2.0
+MIT
