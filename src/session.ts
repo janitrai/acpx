@@ -11,6 +11,8 @@ import type {
 } from "./types.js";
 
 const SESSION_BASE_DIR = path.join(os.homedir(), ".acpx", "sessions");
+const PROCESS_EXIT_GRACE_MS = 1_500;
+const PROCESS_POLL_MS = 50;
 
 export class TimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -100,6 +102,7 @@ async function withInterrupt<T>(
       }
       settled = true;
       process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
       cb();
     };
 
@@ -109,7 +112,14 @@ async function withInterrupt<T>(
       });
     };
 
+    const onSigterm = () => {
+      void onInterrupt().finally(() => {
+        finish(() => reject(new InterruptedError()));
+      });
+    };
+
     process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
 
     void run().then(
       (result) => finish(() => resolve(result)),
@@ -124,13 +134,21 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
   }
 
   const record = raw as Partial<SessionRecord>;
+  const pid =
+    record.pid == null
+      ? undefined
+      : Number.isInteger(record.pid) && record.pid > 0
+        ? record.pid
+        : null;
+
   if (
     typeof record.id !== "string" ||
     typeof record.sessionId !== "string" ||
     typeof record.agentCommand !== "string" ||
     typeof record.cwd !== "string" ||
     typeof record.createdAt !== "string" ||
-    typeof record.lastUsedAt !== "string"
+    typeof record.lastUsedAt !== "string" ||
+    pid === null
   ) {
     return null;
   }
@@ -143,6 +161,7 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     cwd: record.cwd,
     createdAt: record.createdAt,
     lastUsedAt: record.lastUsedAt,
+    pid,
   };
 }
 
@@ -215,6 +234,146 @@ function isoNow(): string {
   return new Date().toISOString();
 }
 
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (error && typeof error === "object") {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === "string" && maybeMessage.length > 0) {
+      return maybeMessage;
+    }
+
+    try {
+      return JSON.stringify(error);
+    } catch {
+      // fall through
+    }
+  }
+
+  return String(error);
+}
+
+function shouldFallbackToNewSession(error: unknown): boolean {
+  if (error instanceof TimeoutError || error instanceof InterruptedError) {
+    return false;
+  }
+
+  const message = formatError(error).toLowerCase();
+  if (
+    message.includes("resource_not_found") ||
+    message.includes("resource not found") ||
+    message.includes("session not found") ||
+    message.includes("unknown session") ||
+    message.includes("invalid session")
+  ) {
+    return true;
+  }
+
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return code === -32001 || code === -32002;
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() <= deadline) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, PROCESS_POLL_MS);
+    });
+  }
+
+  return !isProcessAlive(pid);
+}
+
+async function terminateProcess(pid: number): Promise<boolean> {
+  if (!isProcessAlive(pid)) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return false;
+  }
+
+  if (await waitForProcessExit(pid, PROCESS_EXIT_GRACE_MS)) {
+    return true;
+  }
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return false;
+  }
+
+  await waitForProcessExit(pid, PROCESS_EXIT_GRACE_MS);
+  return true;
+}
+
+function firstAgentCommandToken(command: string): string | undefined {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const token = trimmed.split(/\s+/, 1)[0];
+  return token.length > 0 ? token : undefined;
+}
+
+async function isLikelyMatchingProcess(
+  pid: number,
+  agentCommand: string,
+): Promise<boolean> {
+  const expectedToken = firstAgentCommandToken(agentCommand);
+  if (!expectedToken) {
+    return false;
+  }
+
+  const procCmdline = `/proc/${pid}/cmdline`;
+  try {
+    const payload = await fs.readFile(procCmdline, "utf8");
+    const argv = payload
+      .split("\u0000")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    if (argv.length === 0) {
+      return false;
+    }
+
+    const executableBase = path.basename(argv[0]);
+    const expectedBase = path.basename(expectedToken);
+    return (
+      executableBase === expectedBase ||
+      argv.some((entry) => path.basename(entry) === expectedBase)
+    );
+  } catch {
+    // If /proc is unavailable, fall back to PID liveness checks only.
+    return true;
+  }
+}
+
 export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult> {
   const output = options.outputFormatter;
   const client = new AcpClient({
@@ -277,6 +436,7 @@ export async function createSession(
           cwd: absolutePath(options.cwd),
           createdAt: now,
           lastUsedAt: now,
+          pid: client.getAgentPid(),
           protocolVersion: client.initializeResult?.protocolVersion,
           agentCapabilities: client.initializeResult?.agentCapabilities,
         };
@@ -311,6 +471,7 @@ export async function sendSession(
     return await withInterrupt(
       async () => {
         await withTimeout(client.start(), options.timeoutMs);
+        record.pid = client.getAgentPid();
 
         let resumed = false;
         let loadError: string | undefined;
@@ -319,12 +480,17 @@ export async function sendSession(
         if (client.supportsLoadSession()) {
           try {
             await withTimeout(
-              client.loadSession(record.sessionId, record.cwd),
+              client.loadSessionWithOptions(record.sessionId, record.cwd, {
+                suppressReplayUpdates: true,
+              }),
               options.timeoutMs,
             );
             resumed = true;
           } catch (error) {
-            loadError = error instanceof Error ? error.message : String(error);
+            loadError = formatError(error);
+            if (!shouldFallbackToNewSession(error)) {
+              throw error;
+            }
             activeSessionId = await withTimeout(
               client.createSession(record.cwd),
               options.timeoutMs,
@@ -397,6 +563,13 @@ export async function listSessions(): Promise<SessionRecord[]> {
 
 export async function closeSession(sessionId: string): Promise<SessionRecord> {
   const record = await resolveSessionRecord(sessionId);
+  if (
+    record.pid != null &&
+    isProcessAlive(record.pid) &&
+    (await isLikelyMatchingProcess(record.pid, record.agentCommand))
+  ) {
+    await terminateProcess(record.pid);
+  }
   const file = sessionFilePath(record.id);
   await fs.unlink(file);
   return record;

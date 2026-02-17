@@ -50,6 +50,15 @@ type InternalTerminal = {
 };
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
+const REPLAY_IDLE_MS = 80;
+const REPLAY_DRAIN_TIMEOUT_MS = 5_000;
+const DRAIN_POLL_INTERVAL_MS = 20;
+
+type LoadSessionOptions = {
+  suppressReplayUpdates?: boolean;
+  replayIdleMs?: number;
+  replayDrainTimeoutMs?: number;
+};
 
 function waitForSpawn(child: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -162,6 +171,10 @@ export class AcpClient {
     cancelled: 0,
   };
   private readonly terminals = new Map<string, InternalTerminal>();
+  private sessionUpdateChain: Promise<void> = Promise.resolve();
+  private observedSessionUpdates = 0;
+  private processedSessionUpdates = 0;
+  private suppressSessionUpdates = false;
 
   constructor(options: AcpClientOptions) {
     this.options = {
@@ -172,6 +185,10 @@ export class AcpClient {
 
   get initializeResult(): InitializeResponse | undefined {
     return this.initResult;
+  }
+
+  getAgentPid(): number | undefined {
+    return this.agent?.pid ?? undefined;
   }
 
   getPermissionStats(): PermissionStats {
@@ -204,7 +221,7 @@ export class AcpClient {
     const connection = new ClientSideConnection(
       () => ({
         sessionUpdate: async (params: SessionNotification) => {
-          this.options.onSessionUpdate?.(params);
+          await this.handleSessionUpdate(params);
         },
         requestPermission: async (
           params: RequestPermissionRequest,
@@ -286,12 +303,34 @@ export class AcpClient {
   }
 
   async loadSession(sessionId: string, cwd = this.options.cwd): Promise<void> {
+    this.getConnection();
+    await this.loadSessionWithOptions(sessionId, cwd, {});
+  }
+
+  async loadSessionWithOptions(
+    sessionId: string,
+    cwd = this.options.cwd,
+    options: LoadSessionOptions = {},
+  ): Promise<void> {
     const connection = this.getConnection();
-    await connection.loadSession({
-      sessionId,
-      cwd: asAbsoluteCwd(cwd),
-      mcpServers: [],
-    });
+    const previousSuppression = this.suppressSessionUpdates;
+    this.suppressSessionUpdates =
+      previousSuppression || Boolean(options.suppressReplayUpdates);
+
+    try {
+      await connection.loadSession({
+        sessionId,
+        cwd: asAbsoluteCwd(cwd),
+        mcpServers: [],
+      });
+
+      await this.waitForSessionUpdateDrain(
+        options.replayIdleMs ?? REPLAY_IDLE_MS,
+        options.replayDrainTimeoutMs ?? REPLAY_DRAIN_TIMEOUT_MS,
+      );
+    } finally {
+      this.suppressSessionUpdates = previousSuppression;
+    }
   }
 
   async prompt(sessionId: string, text: string): Promise<PromptResponse> {
@@ -316,6 +355,10 @@ export class AcpClient {
       this.agent.kill();
     }
 
+    this.sessionUpdateChain = Promise.resolve();
+    this.observedSessionUpdates = 0;
+    this.processedSessionUpdates = 0;
+    this.suppressSessionUpdates = false;
     this.connection = undefined;
     this.agent = undefined;
   }
@@ -516,5 +559,60 @@ export class AcpClient {
 
   private getTerminal(terminalId: string): InternalTerminal | undefined {
     return this.terminals.get(terminalId);
+  }
+
+  private async handleSessionUpdate(notification: SessionNotification): Promise<void> {
+    const sequence = ++this.observedSessionUpdates;
+    this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
+      try {
+        if (!this.suppressSessionUpdates) {
+          this.options.onSessionUpdate?.(notification);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`session update handler failed: ${message}`);
+      } finally {
+        this.processedSessionUpdates = sequence;
+      }
+    });
+
+    await this.sessionUpdateChain;
+  }
+
+  private async waitForSessionUpdateDrain(
+    idleMs: number,
+    timeoutMs: number,
+  ): Promise<void> {
+    const normalizedIdleMs = Math.max(0, idleMs);
+    const normalizedTimeoutMs = Math.max(normalizedIdleMs, timeoutMs);
+    const deadline = Date.now() + normalizedTimeoutMs;
+    let lastObserved = this.observedSessionUpdates;
+    let idleSince = Date.now();
+
+    while (Date.now() <= deadline) {
+      const observed = this.observedSessionUpdates;
+      if (observed !== lastObserved) {
+        lastObserved = observed;
+        idleSince = Date.now();
+      }
+
+      if (
+        this.processedSessionUpdates === this.observedSessionUpdates &&
+        Date.now() - idleSince >= normalizedIdleMs
+      ) {
+        await this.sessionUpdateChain;
+        if (this.processedSessionUpdates === this.observedSessionUpdates) {
+          return;
+        }
+      }
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, DRAIN_POLL_INTERVAL_MS);
+      });
+    }
+
+    throw new Error(
+      `Timed out waiting for session replay drain after ${normalizedTimeoutMs}ms`,
+    );
   }
 }

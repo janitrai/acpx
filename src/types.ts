@@ -91,6 +91,7 @@ export type SessionRecord = {
   cwd: string;
   createdAt: string;
   lastUsedAt: string;
+  pid?: number;
   protocolVersion?: number;
   agentCapabilities?: AgentCapabilities;
 };
