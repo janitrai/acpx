@@ -3,14 +3,22 @@
 Headless CLI client for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com) — talk to coding agents from the command line.
 
 ```bash
-# One-shot: run a prompt against Codex, stream output, exit when done
-acpx run --agent codex-acp --cwd ./my-project "Refactor the auth module"
+# Conversational prompt (persistent session, auto-resume by agent+cwd)
+acpx codex "fix the tests"
 
-# Multi-turn: create a session, send messages
-acpx session create --agent codex-acp --cwd ./my-project
-acpx session send <id> "Refactor the auth module"
-acpx session send <id> "Now add tests"
-acpx session close <id>
+# Explicit prompt verb (same behavior)
+acpx codex prompt "fix the tests"
+
+# One-shot execution (no saved session)
+acpx codex exec "what does this repo do"
+
+# Named session
+acpx codex -s backend "fix the API"
+
+# Session management
+acpx codex sessions
+acpx codex sessions close
+acpx codex sessions close backend
 ```
 
 ## Why?
@@ -24,7 +32,7 @@ ACP adapters exist for every major coding agent ([Codex](https://github.com/zed-
 ```bash
 npm install -g acpx
 # or
-npx acpx run --agent codex-acp "Hello"
+npx acpx codex "hello"
 ```
 
 ### Prerequisites
@@ -32,11 +40,11 @@ npx acpx run --agent codex-acp "Hello"
 You need an ACP-compatible agent installed:
 
 ```bash
-# Codex
+# Codex ACP adapter
 npm install -g @zed-industries/codex-acp
 
-# Claude Code
-npm install -g @zed-industries/claude-code-acp
+# Claude ACP adapter
+npm install -g @zed-industries/claude-agent-acp
 
 # Gemini CLI (native ACP support)
 npm install -g @google/gemini-cli
@@ -44,38 +52,67 @@ npm install -g @google/gemini-cli
 
 ## Usage
 
-### One-shot (`run`)
+### Command grammar
 
 ```bash
-# Simple prompt
-acpx run --agent codex-acp --cwd /repo "Fix the failing tests"
-
-# Auto-approve all tool calls
-acpx run --agent codex-acp --cwd /repo --approve-all "Build a REST API"
-
-# JSON output for programmatic use
-acpx run --agent codex-acp --cwd /repo --format json "Add logging"
-
-# Pipe prompt from stdin
-echo "Refactor to async/await" | acpx run --agent codex-acp --cwd /repo
+acpx <agent> [prompt] <text>
+acpx <agent> exec <text>
+acpx <agent> sessions [list|close]
 ```
 
-### Multi-turn sessions
+`prompt` is the default verb, so `acpx codex "..."` and `acpx codex prompt "..."` are equivalent.
+
+### Built-in agent registry
+
+Friendly names are resolved automatically:
+
+- `codex` -> `npx @zed-industries/codex-acp`
+- `claude` -> `npx @zed-industries/claude-agent-acp`
+- `gemini` -> `gemini`
+
+Unknown agent names are treated as raw commands. You can also use the explicit escape hatch:
 
 ```bash
-# Create session
-acpx session create --agent codex-acp --cwd /repo
-# → abc123
+acpx --agent ./my-custom-server "do something"
+```
 
-# Send messages (streams results, exits on completion)
-acpx session send abc123 "Refactor the auth module"
-acpx session send abc123 "Now add tests for it"
+### Session behavior
 
-# List sessions
-acpx session list
+- `prompt` always uses a saved session.
+- Sessions auto-resume by `(agent command, cwd)`.
+- `-s, --session <name>` uses a named session for that `(agent command, cwd)`.
+- `exec` is fire-and-forget (temporary session, not saved).
 
-# Close when done
-acpx session close abc123
+Examples:
+
+```bash
+acpx codex "fix the tests"
+acpx codex -s backend "fix the API"
+acpx claude "refactor auth"
+acpx gemini "add logging"
+```
+
+### Default agent shortcuts
+
+If agent is omitted, default agent is `codex`:
+
+```bash
+acpx prompt "fix tests"
+acpx exec "summarize this repo"
+acpx sessions
+```
+
+### Global options (before agent name)
+
+```text
+--agent <command>     Raw ACP agent command (escape hatch)
+--cwd <dir>           Working directory (default: .)
+--approve-all         Auto-approve all permission requests
+--approve-reads       Auto-approve reads/searches, prompt for writes
+--deny-all            Deny all permission requests
+--format <fmt>        Output format: text (default), json, quiet
+--timeout <seconds>   Maximum time to wait for agent response
+--verbose             Enable debug output on stderr
 ```
 
 ### Output formats
@@ -90,12 +127,12 @@ acpx session close abc123
 
 ```
 ┌─────────┐     stdio/ndjson     ┌──────────────┐     wraps      ┌─────────┐
-│  acpx   │ ◄──────────────────► │  ACP adapter  │ ◄───────────► │  Agent   │
-│ (client) │    ACP protocol     │ (codex-acp)   │               │ (Codex)  │
+│  acpx   │ ◄──────────────────► │  ACP adapter │ ◄───────────► │  Agent  │
+│ (client)│     ACP protocol     │ (codex-acp)  │               │ (Codex) │
 └─────────┘                      └──────────────┘               └─────────┘
 ```
 
-acpx spawns the ACP adapter as a child process, communicates over the ACP protocol (JSON-RPC over stdio), and translates structured events (tool calls, text, permissions) into CLI output.
+acpx spawns the ACP adapter as a child process, communicates over JSON-RPC/ndjson over stdio, and streams structured events (tool calls, text, permissions).
 
 ## License
 

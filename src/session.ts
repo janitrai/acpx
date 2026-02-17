@@ -44,6 +44,7 @@ export type RunOnceOptions = {
 export type SessionCreateOptions = {
   agentCommand: string;
   cwd: string;
+  name?: string;
   permissionMode: PermissionMode;
   verbose?: boolean;
 } & TimedRunOptions;
@@ -134,6 +135,12 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
   }
 
   const record = raw as Partial<SessionRecord>;
+  const name =
+    record.name == null
+      ? undefined
+      : typeof record.name === "string" && record.name.trim().length > 0
+        ? record.name.trim()
+        : null;
   const pid =
     record.pid == null
       ? undefined
@@ -146,6 +153,7 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     typeof record.sessionId !== "string" ||
     typeof record.agentCommand !== "string" ||
     typeof record.cwd !== "string" ||
+    name === null ||
     typeof record.createdAt !== "string" ||
     typeof record.lastUsedAt !== "string" ||
     pid === null
@@ -159,6 +167,7 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     sessionId: record.sessionId,
     agentCommand: record.agentCommand,
     cwd: record.cwd,
+    name,
     createdAt: record.createdAt,
     lastUsedAt: record.lastUsedAt,
     pid,
@@ -228,6 +237,15 @@ function toPromptResult(
 
 function absolutePath(value: string): string {
   return path.resolve(value);
+}
+
+function normalizeName(value: string | undefined): string | undefined {
+  if (value == null) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function isoNow(): string {
@@ -434,6 +452,7 @@ export async function createSession(
           sessionId,
           agentCommand: options.agentCommand,
           cwd: absolutePath(options.cwd),
+          name: normalizeName(options.name),
           createdAt: now,
           lastUsedAt: now,
           pid: client.getAgentPid(),
@@ -566,6 +585,39 @@ export async function listSessions(): Promise<SessionRecord[]> {
 
   records.sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
   return records;
+}
+
+type FindSessionOptions = {
+  agentCommand: string;
+  cwd: string;
+  name?: string;
+};
+
+export async function listSessionsForAgent(
+  agentCommand: string,
+): Promise<SessionRecord[]> {
+  const sessions = await listSessions();
+  return sessions.filter((session) => session.agentCommand === agentCommand);
+}
+
+export async function findSession(
+  options: FindSessionOptions,
+): Promise<SessionRecord | undefined> {
+  const normalizedCwd = absolutePath(options.cwd);
+  const normalizedName = normalizeName(options.name);
+  const sessions = await listSessionsForAgent(options.agentCommand);
+
+  return sessions.find((session) => {
+    if (session.cwd !== normalizedCwd) {
+      return false;
+    }
+
+    if (normalizedName == null) {
+      return session.name == null;
+    }
+
+    return session.name === normalizedName;
+  });
 }
 
 export async function closeSession(sessionId: string): Promise<SessionRecord> {

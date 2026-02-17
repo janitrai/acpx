@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
+import path from "node:path";
+import {
+  DEFAULT_AGENT_NAME,
+  listBuiltInAgents,
+  resolveAgentCommand as resolveAgentCommandFromRegistry,
+} from "./agent-registry.js";
 import { createOutputFormatter } from "./output.js";
 import {
   InterruptedError,
   TimeoutError,
   closeSession,
   createSession,
-  listSessions,
+  findSession,
+  listSessionsForAgent,
   runOnce,
   sendSession,
 } from "./session.js";
@@ -16,6 +23,7 @@ import {
   OUTPUT_FORMATS,
   type OutputFormat,
   type PermissionMode,
+  type SessionRecord,
 } from "./types.js";
 
 type PermissionFlags = {
@@ -24,35 +32,24 @@ type PermissionFlags = {
   denyAll?: boolean;
 };
 
-type BaseRunFlags = PermissionFlags & {
-  timeout?: number;
-  verbose?: boolean;
-  format: OutputFormat;
-};
-
-type RunFlags = BaseRunFlags & {
-  agent: string;
-  cwd: string;
-};
-
-type SessionCreateFlags = PermissionFlags & {
-  agent: string;
+type GlobalFlags = PermissionFlags & {
+  agent?: string;
   cwd: string;
   timeout?: number;
   verbose?: boolean;
   format: OutputFormat;
 };
 
-type SessionSendFlags = BaseRunFlags;
-
-type FormatFlag = {
-  format: OutputFormat;
+type PromptFlags = {
+  session?: string;
 };
+
+const TOP_LEVEL_VERBS = new Set(["prompt", "exec", "sessions", "help"]);
 
 function parseOutputFormat(value: string): OutputFormat {
   if (!OUTPUT_FORMATS.includes(value as OutputFormat)) {
     throw new InvalidArgumentError(
-      `Invalid format "${value}". Expected one of: ${OUTPUT_FORMATS.join(", ")}`,
+      `Invalid format \"${value}\". Expected one of: ${OUTPUT_FORMATS.join(", ")}`,
     );
   }
   return value as OutputFormat;
@@ -64,6 +61,14 @@ function parseTimeoutSeconds(value: string): number {
     throw new InvalidArgumentError("Timeout must be a positive number of seconds");
   }
   return Math.round(parsed * 1000);
+}
+
+function parseSessionName(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new InvalidArgumentError("Session name must not be empty");
+  }
+  return trimmed;
 }
 
 function resolvePermissionMode(flags: PermissionFlags): PermissionMode {
@@ -85,25 +90,6 @@ function resolvePermissionMode(flags: PermissionFlags): PermissionMode {
   }
 
   return "approve-reads";
-}
-
-function addPermissionFlags(command: Command): Command {
-  return command
-    .option("--approve-all", "Auto-approve all permission requests")
-    .option(
-      "--approve-reads",
-      "Auto-approve read/search requests and prompt for writes",
-    )
-    .option("--deny-all", "Deny all permission requests");
-}
-
-function addFormatFlag(command: Command): Command {
-  return command.option(
-    "--format <fmt>",
-    "Output format: text, json, quiet",
-    parseOutputFormat,
-    "text",
-  );
 }
 
 async function readPrompt(promptParts: string[]): Promise<string> {
@@ -147,38 +133,82 @@ function applyPermissionExitCode(result: {
   }
 }
 
-function printSessionRecordByFormat(
-  record: {
-    id: string;
-    sessionId: string;
-    agentCommand: string;
-    cwd: string;
-    createdAt: string;
-    lastUsedAt: string;
-  },
-  format: OutputFormat,
-): void {
-  if (format === "json") {
-    process.stdout.write(
-      `${JSON.stringify({
-        type: "session",
-        ...record,
-      })}\n`,
+function addGlobalFlags(command: Command): Command {
+  return command
+    .option("--agent <command>", "Raw ACP agent command (escape hatch)")
+    .option("--cwd <dir>", "Working directory", process.cwd())
+    .option("--approve-all", "Auto-approve all permission requests")
+    .option(
+      "--approve-reads",
+      "Auto-approve read/search requests and prompt for writes",
+    )
+    .option("--deny-all", "Deny all permission requests")
+    .option(
+      "--format <fmt>",
+      "Output format: text, json, quiet",
+      parseOutputFormat,
+      "text",
+    )
+    .option(
+      "--timeout <seconds>",
+      "Maximum time to wait for agent response",
+      parseTimeoutSeconds,
+    )
+    .option("--verbose", "Enable verbose debug logs");
+}
+
+function addSessionOption(command: Command): Command {
+  return command.option(
+    "-s, --session <name>",
+    "Use named session instead of cwd default",
+    parseSessionName,
+  );
+}
+
+function resolveGlobalFlags(command: Command): GlobalFlags {
+  const opts = command.optsWithGlobals() as Partial<GlobalFlags>;
+  return {
+    agent: opts.agent,
+    cwd: opts.cwd ?? process.cwd(),
+    timeout: opts.timeout,
+    verbose: opts.verbose,
+    format: opts.format ?? "text",
+    approveAll: opts.approveAll,
+    approveReads: opts.approveReads,
+    denyAll: opts.denyAll,
+  };
+}
+
+function resolveAgentInvocation(
+  explicitAgentName: string | undefined,
+  globalFlags: GlobalFlags,
+): {
+  agentName: string;
+  agentCommand: string;
+  cwd: string;
+} {
+  const override = globalFlags.agent?.trim();
+  if (override && explicitAgentName) {
+    throw new InvalidArgumentError(
+      "Do not combine positional agent with --agent override",
     );
-    return;
   }
 
-  process.stdout.write(`${record.id}\n`);
+  const agentName = explicitAgentName ?? DEFAULT_AGENT_NAME;
+  const agentCommand =
+    override && override.length > 0
+      ? override
+      : resolveAgentCommandFromRegistry(agentName);
+
+  return {
+    agentName,
+    agentCommand,
+    cwd: path.resolve(globalFlags.cwd),
+  };
 }
 
 function printSessionsByFormat(
-  sessions: Array<{
-    id: string;
-    sessionId: string;
-    cwd: string;
-    agentCommand: string;
-    lastUsedAt: string;
-  }>,
+  sessions: SessionRecord[],
   format: OutputFormat,
 ): void {
   if (format === "json") {
@@ -200,9 +230,306 @@ function printSessionsByFormat(
 
   for (const session of sessions) {
     process.stdout.write(
-      `${session.id}\t${session.cwd}\t${session.lastUsedAt}\n`,
+      `${session.id}\t${session.name ?? "-"}\t${session.cwd}\t${session.lastUsedAt}\n`,
     );
   }
+}
+
+function printClosedSessionByFormat(
+  record: SessionRecord,
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        type: "session_closed",
+        id: record.id,
+        sessionId: record.sessionId,
+        name: record.name,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    return;
+  }
+
+  process.stdout.write(`${record.id}\n`);
+}
+
+async function handlePrompt(
+  explicitAgentName: string | undefined,
+  promptParts: string[],
+  flags: PromptFlags,
+  command: Command,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command);
+  const permissionMode = resolvePermissionMode(globalFlags);
+  const prompt = await readPrompt(promptParts);
+  const outputFormatter = createOutputFormatter(globalFlags.format);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+
+  let record = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.session,
+  });
+
+  if (!record) {
+    record = await createSession({
+      agentCommand: agent.agentCommand,
+      cwd: agent.cwd,
+      name: flags.session,
+      permissionMode,
+      timeoutMs: globalFlags.timeout,
+      verbose: globalFlags.verbose,
+    });
+
+    if (globalFlags.verbose) {
+      const scope = flags.session ? `named session \"${flags.session}\"` : "cwd session";
+      process.stderr.write(`[acpx] created ${scope}: ${record.id}\n`);
+    }
+  }
+
+  const result = await sendSession({
+    sessionId: record.id,
+    message: prompt,
+    permissionMode,
+    outputFormatter,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  applyPermissionExitCode(result);
+
+  if (globalFlags.verbose && result.loadError) {
+    process.stderr.write(
+      `[acpx] loadSession failed, started fresh session: ${result.loadError}\n`,
+    );
+  }
+}
+
+async function handleExec(
+  explicitAgentName: string | undefined,
+  promptParts: string[],
+  command: Command,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command);
+  const permissionMode = resolvePermissionMode(globalFlags);
+  const prompt = await readPrompt(promptParts);
+  const outputFormatter = createOutputFormatter(globalFlags.format);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+
+  const result = await runOnce({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    message: prompt,
+    permissionMode,
+    outputFormatter,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  applyPermissionExitCode(result);
+}
+
+async function handleSessionsList(
+  explicitAgentName: string | undefined,
+  command: Command,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const sessions = await listSessionsForAgent(agent.agentCommand);
+  printSessionsByFormat(sessions, globalFlags.format);
+}
+
+async function handleSessionsClose(
+  explicitAgentName: string | undefined,
+  sessionName: string | undefined,
+  command: Command,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+
+  const record = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: sessionName,
+  });
+
+  if (!record) {
+    if (sessionName) {
+      throw new Error(
+        `No named session \"${sessionName}\" for cwd ${agent.cwd} and agent ${agent.agentName}`,
+      );
+    }
+
+    throw new Error(
+      `No cwd session for ${agent.cwd} and agent ${agent.agentName}`,
+    );
+  }
+
+  const closed = await closeSession(record.id);
+  printClosedSessionByFormat(closed, globalFlags.format);
+}
+
+function registerSessionsCommand(
+  parent: Command,
+  explicitAgentName: string | undefined,
+): void {
+  const sessionsCommand = parent
+    .command("sessions")
+    .description("List or close sessions for this agent");
+
+  sessionsCommand.action(async function (this: Command) {
+    await handleSessionsList(explicitAgentName, this);
+  });
+
+  sessionsCommand
+    .command("list")
+    .description("List sessions")
+    .action(async function (this: Command) {
+      await handleSessionsList(explicitAgentName, this);
+    });
+
+  sessionsCommand
+    .command("close")
+    .description("Close session for current cwd")
+    .argument("[name]", "Session name", parseSessionName)
+    .action(async function (this: Command, name?: string) {
+      await handleSessionsClose(explicitAgentName, name, this);
+    });
+}
+
+function registerAgentCommand(program: Command, agentName: string): void {
+  const agentCommand = program
+    .command(agentName)
+    .description(`Use ${agentName} agent`)
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError();
+
+  addSessionOption(agentCommand);
+
+  agentCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: PromptFlags,
+  ) {
+    await handlePrompt(agentName, promptParts, flags, this);
+  });
+
+  const promptCommand = agentCommand
+    .command("prompt")
+    .description("Prompt using persistent session")
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError();
+  addSessionOption(promptCommand);
+
+  promptCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: PromptFlags,
+  ) {
+    await handlePrompt(agentName, promptParts, flags, this);
+  });
+
+  agentCommand
+    .command("exec")
+    .description("One-shot prompt without saved session")
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError()
+    .action(async function (this: Command, promptParts: string[]) {
+      await handleExec(agentName, promptParts, this);
+    });
+
+  registerSessionsCommand(agentCommand, agentName);
+}
+
+function registerDefaultCommands(program: Command): void {
+  const promptCommand = program
+    .command("prompt")
+    .description(`Prompt using ${DEFAULT_AGENT_NAME} by default`)
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError();
+  addSessionOption(promptCommand);
+
+  promptCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: PromptFlags,
+  ) {
+    await handlePrompt(undefined, promptParts, flags, this);
+  });
+
+  program
+    .command("exec")
+    .description(`One-shot prompt using ${DEFAULT_AGENT_NAME} by default`)
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError()
+    .action(async function (this: Command, promptParts: string[]) {
+      await handleExec(undefined, promptParts, this);
+    });
+
+  registerSessionsCommand(program, undefined);
+}
+
+type AgentTokenScan = {
+  token?: string;
+  hasAgentOverride: boolean;
+};
+
+function detectAgentToken(argv: string[]): AgentTokenScan {
+  let hasAgentOverride = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+
+    if (token === "--") {
+      break;
+    }
+
+    if (!token.startsWith("-") || token === "-") {
+      return { token, hasAgentOverride };
+    }
+
+    if (token === "--agent") {
+      hasAgentOverride = true;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--agent=")) {
+      hasAgentOverride = true;
+      continue;
+    }
+
+    if (token === "--cwd" || token === "--format" || token === "--timeout") {
+      index += 1;
+      continue;
+    }
+
+    if (
+      token.startsWith("--cwd=") ||
+      token.startsWith("--format=") ||
+      token.startsWith("--timeout=")
+    ) {
+      continue;
+    }
+
+    if (
+      token === "--approve-all" ||
+      token === "--approve-reads" ||
+      token === "--deny-all" ||
+      token === "--verbose"
+    ) {
+      continue;
+    }
+
+    return { hasAgentOverride };
+  }
+
+  return { hasAgentOverride };
 }
 
 async function main(): Promise<void> {
@@ -213,151 +540,50 @@ async function main(): Promise<void> {
     .description("Headless CLI client for the Agent Client Protocol")
     .showHelpAfterError();
 
-  program
-    .command("run")
-    .description("Run a one-shot prompt")
-    .argument("[prompt...]", "Prompt text")
-    .requiredOption("--agent <command>", "ACP adapter command")
-    .option("--cwd <dir>", "Working directory", process.cwd())
-    .option(
-      "--timeout <seconds>",
-      "Maximum time to wait for agent response",
-      parseTimeoutSeconds,
-    )
-    .option("--verbose", "Enable verbose debug logs")
-    .allowUnknownOption(false);
+  addGlobalFlags(program);
 
-  const runCommand = program.commands.find((cmd) => cmd.name() === "run");
-  if (!runCommand) {
-    throw new Error("Failed to build run command");
+  const builtInAgents = listBuiltInAgents();
+  for (const agentName of builtInAgents) {
+    registerAgentCommand(program, agentName);
   }
 
-  addPermissionFlags(runCommand);
-  addFormatFlag(runCommand);
+  registerDefaultCommands(program);
 
-  runCommand.action(async (promptParts: string[], flags: RunFlags) => {
-    const prompt = await readPrompt(promptParts);
-    const permissionMode = resolvePermissionMode(flags);
-    const formatter = createOutputFormatter(flags.format);
+  const scan = detectAgentToken(process.argv.slice(2));
+  if (
+    !scan.hasAgentOverride &&
+    scan.token &&
+    !TOP_LEVEL_VERBS.has(scan.token) &&
+    !builtInAgents.includes(scan.token)
+  ) {
+    registerAgentCommand(program, scan.token);
+  }
 
-    const result = await runOnce({
-      agentCommand: flags.agent,
-      cwd: flags.cwd,
-      message: prompt,
-      permissionMode,
-      outputFormatter: formatter,
-      timeoutMs: flags.timeout,
-      verbose: flags.verbose,
-    });
-
-    applyPermissionExitCode(result);
-  });
-
-  const session = program.command("session").description("Session management");
-
-  const sessionCreate = session
-    .command("create")
-    .description("Create a persistent session")
-    .requiredOption("--agent <command>", "ACP adapter command")
-    .option("--cwd <dir>", "Working directory", process.cwd())
-    .option(
-      "--timeout <seconds>",
-      "Maximum time to wait for agent response",
-      parseTimeoutSeconds,
-    )
-    .option("--verbose", "Enable verbose debug logs");
-
-  addPermissionFlags(sessionCreate);
-  addFormatFlag(sessionCreate);
-
-  sessionCreate.action(async (flags: SessionCreateFlags) => {
-    const permissionMode = resolvePermissionMode(flags);
-    const record = await createSession({
-      agentCommand: flags.agent,
-      cwd: flags.cwd,
-      permissionMode,
-      timeoutMs: flags.timeout,
-      verbose: flags.verbose,
-    });
-    printSessionRecordByFormat(record, flags.format);
-  });
-
-  const sessionSend = session
-    .command("send")
-    .description("Send a prompt to an existing session")
-    .argument("<sessionId>", "Session ID")
+  program
     .argument("[prompt...]", "Prompt text")
-    .option(
-      "--timeout <seconds>",
-      "Maximum time to wait for agent response",
-      parseTimeoutSeconds,
-    )
-    .option("--verbose", "Enable verbose debug logs");
-
-  addPermissionFlags(sessionSend);
-  addFormatFlag(sessionSend);
-
-  sessionSend.action(
-    async (sessionId: string, promptParts: string[], flags: SessionSendFlags) => {
-      const prompt = await readPrompt(promptParts);
-      const permissionMode = resolvePermissionMode(flags);
-      const formatter = createOutputFormatter(flags.format);
-
-      const result = await sendSession({
-        sessionId,
-        message: prompt,
-        permissionMode,
-        outputFormatter: formatter,
-        timeoutMs: flags.timeout,
-        verbose: flags.verbose,
-      });
-
-      applyPermissionExitCode(result);
-
-      if (flags.verbose && result.loadError) {
-        process.stderr.write(
-          `[acpx] loadSession failed, started fresh session: ${result.loadError}\n`,
-        );
+    .action(async function (this: Command, promptParts: string[]) {
+      if (promptParts.length === 0 && process.stdin.isTTY) {
+        this.outputHelp();
+        return;
       }
-    },
+
+      await handlePrompt(undefined, promptParts, {}, this);
+    });
+
+  program.addHelpText(
+    "after",
+    `
+Examples:
+  acpx codex \"fix the tests\"
+  acpx codex prompt \"fix the tests\"
+  acpx codex exec \"what does this repo do\"
+  acpx codex -s backend \"fix the API\"
+  acpx codex sessions
+  acpx codex sessions close backend
+  acpx claude \"refactor auth\"
+  acpx gemini \"add logging\"
+  acpx --agent ./my-custom-server \"do something\"`,
   );
-
-  const sessionList = session
-    .command("list")
-    .description("List saved sessions");
-  addFormatFlag(sessionList);
-
-  sessionList.action(async (flags: FormatFlag) => {
-    const sessions = await listSessions();
-    printSessionsByFormat(sessions, flags.format);
-  });
-
-  const sessionClose = session
-    .command("close")
-    .description("Close and remove a saved session")
-    .argument("<sessionId>", "Session ID");
-  addFormatFlag(sessionClose);
-
-  sessionClose.action(async (sessionId: string, flags: FormatFlag) => {
-    const record = await closeSession(sessionId);
-
-    if (flags.format === "json") {
-      process.stdout.write(
-        `${JSON.stringify({
-          type: "session_closed",
-          id: record.id,
-          sessionId: record.sessionId,
-        })}\n`,
-      );
-      return;
-    }
-
-    if (flags.format === "quiet") {
-      return;
-    }
-
-    process.stdout.write(`${record.id}\n`);
-  });
 
   program.exitOverride((error) => {
     throw error;

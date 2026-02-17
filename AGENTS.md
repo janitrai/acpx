@@ -2,17 +2,15 @@
 
 ## What is acpx?
 
-`acpx` is a headless, scriptable CLI client for the Agent Client Protocol (ACP). It lets AI agents (or humans) create sessions with ACP-compatible coding agents (Codex, Claude Code, Gemini CLI, etc.), send messages, stream structured results, and manage multiple concurrent sessions — all from the command line.
+`acpx` is a headless, scriptable CLI client for the Agent Client Protocol (ACP). It lets AI agents (or humans) create and resume ACP sessions, send prompts, stream structured results, and manage multiple sessions from the command line.
 
-Think of it as "curl for ACP" — a simple, pipe-friendly tool that bridges the gap between agent harnesses (like OpenClaw) and coding agents, replacing raw PTY/terminal scraping with structured protocol communication.
+Think of it as "curl for ACP": a pipe-friendly bridge between orchestrators (like OpenClaw) and coding agents, without PTY scraping.
 
 ## Why?
 
-Today, when an AI orchestrator (like OpenClaw) wants to use Codex or Claude Code, it spawns them as raw terminal processes via node-pty and scrapes their output. This works but loses all structure — tool calls, permission requests, diffs, and session state are reduced to ANSI terminal text.
+Orchestrators commonly spawn coding agents in raw terminals and parse ANSI text. That loses structure: tool calls, permission requests, plans, diffs, and session state.
 
-ACP adapters exist for all major coding agents (codex-acp, claude-code-acp, gemini-cli, etc.), but there's no headless CLI client that can talk to them programmatically. Every existing ACP client is either a GUI app, an editor plugin, or an interactive REPL.
-
-`acpx` fills this gap.
+ACP adapters already exist for major agents, but there was no headless CLI client focused on scripted use. `acpx` fills that gap.
 
 ## Architecture
 
@@ -23,59 +21,90 @@ ACP adapters exist for all major coding agents (codex-acp, claude-code-acp, gemi
 └─────────────┘                      └──────────────┘               └─────────┘
 ```
 
-acpx spawns the ACP adapter as a child process, communicates over stdio using ndjson (JSON-RPC), and exposes simple CLI subcommands.
+acpx spawns the ACP adapter as a child process and communicates over stdio using ndjson (JSON-RPC).
 
-## Core Commands
+## CLI Design
 
-### `acpx run` — One-shot execution (most common)
+### Grammar
+
 ```bash
-# Run a prompt against codex, stream output, exit when done
-acpx run --agent codex-acp --cwd /path/to/repo "Refactor the auth module"
-
-# Pipe-friendly: prompt from stdin
-echo "Add error handling to all API calls" | acpx run --agent codex-acp --cwd /repo
-
-# With specific agent args
-acpx run --agent "npx @zed-industries/codex-acp" --cwd /repo "Build a REST API"
-
-# Auto-approve all tool calls (yolo mode)
-acpx run --agent codex-acp --cwd /repo --approve-all "Fix the tests"
+acpx <agent> [prompt] <text>
+acpx <agent> exec <text>
+acpx <agent> sessions [list|close]
 ```
 
-### `acpx session` — Multi-turn session management
+`prompt` is implicit, so `acpx codex "fix tests"` and `acpx codex prompt "fix tests"` are equivalent.
+
+### Examples
+
 ```bash
-# Create a persistent session
-acpx session create --agent codex-acp --cwd /repo
-# → session:abc123
-
-# Send a message, stream results, return when agent stops
-acpx session send abc123 "Refactor the auth module"
-# → streams tool calls, text chunks, etc.
-# → exits with 0 when prompt completes
-
-# Send another message to the same session
-acpx session send abc123 "Now add tests for the refactored code"
-
-# List active sessions
-acpx session list
-
-# Close/destroy a session
-acpx session close abc123
+acpx codex 'fix the tests'                    # implicit prompt, auto-resume session for cwd
+acpx codex prompt 'fix the tests'             # explicit prompt
+acpx codex exec 'what does this repo do'      # one-shot, no saved session
+acpx codex -s backend 'fix the API'           # named session
+acpx codex sessions                           # list sessions for codex
+acpx codex sessions close                     # close cwd-scoped codex session
+acpx codex sessions close backend             # close named codex session
+acpx claude 'refactor auth'                   # claude adapter
+acpx gemini 'add logging'                     # gemini adapter
 ```
 
-### Global Options
+Default-agent shortcuts are also supported:
+
+```bash
+acpx prompt 'fix tests'   # defaults to codex
+acpx exec 'summarize repo'
+acpx sessions
 ```
---agent <command>     ACP agent command (e.g. "codex-acp", "claude-code-acp", "npx @zed-industries/codex-acp")
+
+## Agent Registry
+
+Built-in friendly names map to commands:
+
+```ts
+const AGENT_REGISTRY: Record<string, string> = {
+  codex:  'npx @zed-industries/codex-acp',
+  claude: 'npx @zed-industries/claude-agent-acp',
+  gemini: 'gemini',
+};
+```
+
+Rules:
+- Known names resolve automatically.
+- Unknown names are treated as raw commands.
+- Escape hatch: `--agent <command>` sets a raw command explicitly.
+- Default agent is `codex` for top-level `prompt|exec|sessions` verbs.
+
+## Session Behavior
+
+- `prompt` always uses a saved session.
+- Session auto-resume lookup is scoped by `(agent command, cwd)`.
+- `-s <name>` switches to named-session scope `(agent command, cwd, name)`.
+- `exec` is one-shot: temporary session, prompt, discard.
+- `sessions list` lists all saved sessions for the selected agent command.
+- `sessions close [name]` closes/removes cwd-scoped session or named cwd-scoped session.
+
+Sessions are persisted in `~/.acpx/sessions/*.json`.
+
+## Global Options
+
+These go before the agent name:
+
+```text
+--agent <command>     Raw ACP agent command (escape hatch)
 --cwd <dir>           Working directory for the session (default: .)
---approve-all         Auto-approve all tool permission requests
---format <fmt>        Output format: "text" (default, human-readable), "json" (structured ndjson), "quiet" (minimal)
+--approve-all         Auto-approve all permission requests
+--approve-reads       Auto-approve reads/searches, prompt for writes
+--deny-all            Deny all permission requests
+--format <fmt>        Output format: text (default), json, quiet
 --timeout <seconds>   Maximum time to wait for agent response
 --verbose             Show ACP protocol debug info on stderr
 ```
 
 ## Output Formats
 
-### text (default) — Human-readable streaming
+### text (default)
+
 ```
 [tool] read_file: src/auth.ts (completed)
 [tool] edit_file: src/auth.ts (running)
@@ -88,7 +117,8 @@ All 42 tests passing.
 [done] end_turn
 ```
 
-### json — Structured ndjson for programmatic consumption
+### json
+
 ```json
 {"type":"tool_call","title":"read_file: src/auth.ts","status":"completed","timestamp":"..."}
 {"type":"text","content":"Refactored the auth module..."}
@@ -96,106 +126,76 @@ All 42 tests passing.
 {"type":"done","stopReason":"end_turn","timestamp":"..."}
 ```
 
-### quiet — Just the final text output
+### quiet
+
 ```
 Refactored the auth module to use async/await. All 42 tests passing.
 ```
 
-## Session Persistence
-
-Sessions are stored as JSON files in `~/.acpx/sessions/` so they survive process restarts. Each session file contains:
-- Session ID
-- Agent command used
-- Working directory
-- ACP connection state
-- Created/last-used timestamps
-
-The agent subprocess is re-spawned on `session send` if it's not running (using ACP's `loadSession` capability if the agent supports it).
-
 ## Permission Handling
 
-By default, acpx prompts on stderr for dangerous tool calls (writes, executes). Options:
-- `--approve-all` — auto-approve everything (like codex --yolo)
-- `--approve-reads` — auto-approve reads/searches, prompt for writes (default)
-- `--deny-all` — deny all permission requests (read-only mode)
+- `--approve-all` auto-approves everything
+- `--approve-reads` auto-approves reads/searches and prompts for writes (default)
+- `--deny-all` denies all permission requests
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| 0    | Success (agent completed normally) |
-| 1    | Agent error / protocol error |
+| 0    | Success |
+| 1    | Agent/protocol error |
 | 2    | CLI usage error |
 | 3    | Timeout |
-| 4    | Agent permission denied (all options rejected) |
+| 4    | Permission denied (all options rejected) |
 | 130  | Interrupted (Ctrl+C) |
 
 ## Tech Stack
 
-- **Language**: TypeScript
-- **ACP SDK**: `@agentclientprotocol/sdk` (official TypeScript SDK)
-- **CLI framework**: Keep it minimal — `commander` or just manual arg parsing
-- **Build**: tsup or tsc, ship as a single bin
-- **Package**: `acpx` on npm, under `@janitrai/acpx` scoped
-- **Runtime**: Node.js 18+
-- **No other dependencies** if possible — keep it lean
+- Language: TypeScript
+- ACP SDK: `@agentclientprotocol/sdk`
+- CLI framework: `commander`
+- Build: `tsup`
+- Runtime: Node.js 18+
 
 ## Project Structure
 
 ```
 acpx/
 ├── src/
-│   ├── cli.ts              # CLI entry point, arg parsing
-│   ├── client.ts           # ACP client wrapper (spawn agent, initialize, manage connection)
-│   ├── session.ts          # Session create/send/list/close logic
-│   ├── permissions.ts      # Permission request handling (auto-approve, prompt, deny)
-│   ├── output.ts           # Output formatters (text, json, quiet)
+│   ├── cli.ts              # CLI entry point and command grammar
+│   ├── agent-registry.ts   # Friendly-name agent registry
+│   ├── client.ts           # ACP client wrapper
+│   ├── session.ts          # Session create/send/list/close + persistence
+│   ├── permissions.ts      # Permission request policy handling
+│   ├── output.ts           # Output formatters (text/json/quiet)
 │   └── types.ts            # Shared types
 ├── package.json
 ├── tsconfig.json
 ├── README.md
-├── LICENSE                 # Apache-2.0
-└── AGENTS.md               # This file
+├── LICENSE
+└── AGENTS.md
 ```
 
 ## Implementation Notes
 
-- Use `@agentclientprotocol/sdk`'s `ClientSideConnection`, `ndJsonStream`, and `PROTOCOL_VERSION`
-- Spawn agent as child process with `stdio: ['pipe', 'pipe', 'inherit']` (stderr passthrough)
-- The `run` command is syntactic sugar for: create session → send prompt → wait for completion → exit
-- Stream `sessionUpdate` notifications to stdout in chosen format as they arrive
-- For `session send`, reconnect to an existing session by re-spawning the agent and using `loadSession` if available, otherwise `newSession`
-- `clientCapabilities` should advertise `fs: { readTextFile: true, writeTextFile: true }` and `terminal: true`
-- Handle SIGINT gracefully: kill agent subprocess, clean up session files
-
-## ACP Protocol Reference
-
-Key ACP SDK types and methods used:
-- `ClientSideConnection` — client-side connection manager
-- `ndJsonStream(input, output)` — create ndjson transport over stdio
-- `connection.initialize({ protocolVersion, clientCapabilities, clientInfo })` — handshake
-- `connection.newSession({ cwd, mcpServers })` — create session
-- `connection.loadSession({ sessionId })` — resume session (if agent supports it)
-- `connection.prompt({ sessionId, prompt: [{ type: "text", text }] })` — send message
-- `SessionNotification.update.sessionUpdate` values:
-  - `"agent_message_chunk"` — text content from agent
-  - `"tool_call"` — tool invocation (title, status)
-  - `"tool_call_update"` — tool progress update
-  - `"plan"` — agent execution plan
-  - `"agent_thought_chunk"` — thinking/reasoning content
-- `RequestPermissionRequest` — permission prompt with options
-- `RequestPermissionResponse` — outcome: selected/cancelled
+- Use `ClientSideConnection`, `ndJsonStream`, and `PROTOCOL_VERSION` from ACP SDK
+- Spawn agent with `stdio: ['pipe', 'pipe', 'inherit']`
+- Stream `sessionUpdate` notifications directly to formatter output
+- Prefer `loadSession` when supported, fallback to `newSession`
+- Advertise client capabilities:
+  - `fs: { readTextFile: true, writeTextFile: true }`
+  - `terminal: true`
+- Handle SIGINT/SIGTERM with client cleanup
 
 ## Reference Implementations
 
-Study these for patterns:
-- OpenClaw's ACP client: `/home/bob/openclaw/src/acp/client.ts` (see `createAcpClient()` and `runAcpClientInteractive()`)
+- OpenClaw ACP client: `/home/bob/openclaw/src/acp/client.ts`
 - ACP SDK example: `/tmp/acp-sdk/src/examples/client.ts`
 - Codex ACP adapter: `https://github.com/zed-industries/codex-acp`
 
-## Non-Goals (for v1)
+## Non-Goals (v1)
 
-- No remote/HTTP transport (stdio only for now)
-- No MCP server passthrough (empty `mcpServers: []`)
-- No agent discovery/registry integration
-- No daemon mode (acpx is stateless between invocations, agent subprocess lives only during command execution)
+- No remote/HTTP transport (stdio only)
+- No MCP passthrough (`mcpServers: []`)
+- No agent discovery/registry service integration
+- No daemon mode

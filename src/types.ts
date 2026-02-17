@@ -89,6 +89,7 @@ export type SessionRecord = {
   sessionId: string;
   agentCommand: string;
   cwd: string;
+  name?: string;
   createdAt: string;
   lastUsedAt: string;
   pid?: number;
