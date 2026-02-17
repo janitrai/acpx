@@ -1,0 +1,171 @@
+import {
+  type PermissionOption,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type ToolKind,
+} from "@agentclientprotocol/sdk";
+import readline from "node:readline/promises";
+import type { PermissionMode } from "./types.js";
+
+type PermissionDecision = "approved" | "denied" | "cancelled";
+
+function selected(optionId: string): RequestPermissionResponse {
+  return { outcome: { outcome: "selected", optionId } };
+}
+
+function cancelled(): RequestPermissionResponse {
+  return { outcome: { outcome: "cancelled" } };
+}
+
+function pickOption(
+  options: PermissionOption[],
+  kinds: PermissionOption["kind"][],
+): PermissionOption | undefined {
+  for (const kind of kinds) {
+    const match = options.find((option) => option.kind === kind);
+    if (match) {
+      return match;
+    }
+  }
+  return undefined;
+}
+
+function inferToolKind(params: RequestPermissionRequest): ToolKind | undefined {
+  if (params.toolCall.kind) {
+    return params.toolCall.kind;
+  }
+
+  const title = params.toolCall.title?.trim().toLowerCase();
+  if (!title) {
+    return undefined;
+  }
+
+  const head = title.split(":", 1)[0]?.trim();
+  if (!head) {
+    return undefined;
+  }
+
+  if (head.includes("read") || head.includes("cat")) {
+    return "read";
+  }
+  if (head.includes("search") || head.includes("find") || head.includes("grep")) {
+    return "search";
+  }
+  if (head.includes("write") || head.includes("edit") || head.includes("patch")) {
+    return "edit";
+  }
+  if (head.includes("delete") || head.includes("remove")) {
+    return "delete";
+  }
+  if (head.includes("move") || head.includes("rename")) {
+    return "move";
+  }
+  if (head.includes("run") || head.includes("execute") || head.includes("bash")) {
+    return "execute";
+  }
+  if (head.includes("fetch") || head.includes("http") || head.includes("url")) {
+    return "fetch";
+  }
+  if (head.includes("think")) {
+    return "think";
+  }
+
+  return "other";
+}
+
+function isAutoApprovedReadKind(kind: ToolKind | undefined): boolean {
+  return kind === "read" || kind === "search";
+}
+
+async function promptForPermission(
+  params: RequestPermissionRequest,
+): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    return false;
+  }
+
+  const toolName = params.toolCall.title ?? "tool";
+  const toolKind = inferToolKind(params) ?? "other";
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+
+  try {
+    const answer = await rl.question(
+      `\n[permission] Allow ${toolName} [${toolKind}]? (y/N) `,
+    );
+    const normalized = answer.trim().toLowerCase();
+    return normalized === "y" || normalized === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+export async function resolvePermissionRequest(
+  params: RequestPermissionRequest,
+  mode: PermissionMode,
+): Promise<RequestPermissionResponse> {
+  const options = params.options ?? [];
+  if (options.length === 0) {
+    return cancelled();
+  }
+
+  const allowOption = pickOption(options, ["allow_once", "allow_always"]);
+  const rejectOption = pickOption(options, ["reject_once", "reject_always"]);
+
+  if (mode === "approve-all") {
+    if (allowOption) {
+      return selected(allowOption.optionId);
+    }
+    return selected(options[0].optionId);
+  }
+
+  if (mode === "deny-all") {
+    if (rejectOption) {
+      return selected(rejectOption.optionId);
+    }
+    return cancelled();
+  }
+
+  const kind = inferToolKind(params);
+  if (isAutoApprovedReadKind(kind) && allowOption) {
+    return selected(allowOption.optionId);
+  }
+
+  const approved = await promptForPermission(params);
+  if (approved && allowOption) {
+    return selected(allowOption.optionId);
+  }
+  if (!approved && rejectOption) {
+    return selected(rejectOption.optionId);
+  }
+  return cancelled();
+}
+
+export function classifyPermissionDecision(
+  params: RequestPermissionRequest,
+  response: RequestPermissionResponse,
+): PermissionDecision {
+  if (response.outcome.outcome !== "selected") {
+    return "cancelled";
+  }
+
+  const selectedOptionId = response.outcome.optionId;
+  const selectedOption = params.options.find(
+    (option) => option.optionId === selectedOptionId,
+  );
+
+  if (!selectedOption) {
+    return "cancelled";
+  }
+
+  if (
+    selectedOption.kind === "allow_once" ||
+    selectedOption.kind === "allow_always"
+  ) {
+    return "approved";
+  }
+
+  return "denied";
+}

@@ -1,0 +1,520 @@
+import {
+  ClientSideConnection,
+  PROTOCOL_VERSION,
+  ndJsonStream,
+  type CreateTerminalRequest,
+  type CreateTerminalResponse,
+  type InitializeResponse,
+  type KillTerminalCommandRequest,
+  type KillTerminalCommandResponse,
+  type PromptResponse,
+  type ReadTextFileRequest,
+  type ReadTextFileResponse,
+  type ReleaseTerminalRequest,
+  type ReleaseTerminalResponse,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type SessionNotification,
+  type TerminalOutputRequest,
+  type TerminalOutputResponse,
+  type WaitForTerminalExitRequest,
+  type WaitForTerminalExitResponse,
+  type WriteTextFileRequest,
+  type WriteTextFileResponse,
+} from "@agentclientprotocol/sdk";
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessByStdio,
+} from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Readable, Writable } from "node:stream";
+import { classifyPermissionDecision, resolvePermissionRequest } from "./permissions.js";
+import type { AcpClientOptions, PermissionStats } from "./types.js";
+
+type CommandParts = {
+  command: string;
+  args: string[];
+};
+
+type InternalTerminal = {
+  process: ChildProcessByStdio<null, Readable, Readable>;
+  output: Buffer;
+  truncated: boolean;
+  outputByteLimit: number;
+  exitCode: number | null | undefined;
+  signal: NodeJS.Signals | null | undefined;
+  waiters: Array<(response: WaitForTerminalExitResponse) => void>;
+};
+
+const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
+
+function waitForSpawn(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onSpawn = () => {
+      child.off("error", onError);
+      resolve();
+    };
+    const onError = (error: Error) => {
+      child.off("spawn", onSpawn);
+      reject(error);
+    };
+
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+  });
+}
+
+function splitCommandLine(value: string): CommandParts {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaping = false;
+
+  for (const ch of value) {
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+
+    if (ch === "\\" && quote !== "'") {
+      escaping = true;
+      continue;
+    }
+
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (escaping) {
+    current += "\\";
+  }
+
+  if (quote) {
+    throw new Error("Invalid --agent command: unterminated quote");
+  }
+
+  if (current.length > 0) {
+    parts.push(current);
+  }
+
+  if (parts.length === 0) {
+    throw new Error("Invalid --agent command: empty command");
+  }
+
+  return {
+    command: parts[0],
+    args: parts.slice(1),
+  };
+}
+
+function asAbsoluteCwd(cwd: string): string {
+  return path.resolve(cwd);
+}
+
+function toEnvObject(
+  env: CreateTerminalRequest["env"],
+): NodeJS.ProcessEnv | undefined {
+  if (!env || env.length === 0) {
+    return undefined;
+  }
+
+  const merged: NodeJS.ProcessEnv = { ...process.env };
+  for (const entry of env) {
+    merged[entry.name] = entry.value;
+  }
+  return merged;
+}
+
+export class AcpClient {
+  private readonly options: AcpClientOptions;
+  private connection?: ClientSideConnection;
+  private agent?: ChildProcessByStdio<Writable, Readable, null>;
+  private initResult?: InitializeResponse;
+  private readonly permissionStats: PermissionStats = {
+    requested: 0,
+    approved: 0,
+    denied: 0,
+    cancelled: 0,
+  };
+  private readonly terminals = new Map<string, InternalTerminal>();
+
+  constructor(options: AcpClientOptions) {
+    this.options = {
+      ...options,
+      cwd: asAbsoluteCwd(options.cwd),
+    };
+  }
+
+  get initializeResult(): InitializeResponse | undefined {
+    return this.initResult;
+  }
+
+  getPermissionStats(): PermissionStats {
+    return { ...this.permissionStats };
+  }
+
+  supportsLoadSession(): boolean {
+    return Boolean(this.initResult?.agentCapabilities?.loadSession);
+  }
+
+  async start(): Promise<void> {
+    if (this.connection && this.agent) {
+      return;
+    }
+
+    const { command, args } = splitCommandLine(this.options.agentCommand);
+    this.log(`spawning agent: ${command} ${args.join(" ")}`);
+
+    const child = spawn(command, args, {
+      cwd: this.options.cwd,
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+
+    await waitForSpawn(child);
+
+    const input = Writable.toWeb(child.stdin);
+    const output = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+    const stream = ndJsonStream(input, output);
+
+    const connection = new ClientSideConnection(
+      () => ({
+        sessionUpdate: async (params: SessionNotification) => {
+          this.options.onSessionUpdate?.(params);
+        },
+        requestPermission: async (
+          params: RequestPermissionRequest,
+        ): Promise<RequestPermissionResponse> => {
+          return this.handlePermissionRequest(params);
+        },
+        readTextFile: async (
+          params: ReadTextFileRequest,
+        ): Promise<ReadTextFileResponse> => {
+          return this.handleReadTextFile(params);
+        },
+        writeTextFile: async (
+          params: WriteTextFileRequest,
+        ): Promise<WriteTextFileResponse> => {
+          return this.handleWriteTextFile(params);
+        },
+        createTerminal: async (
+          params: CreateTerminalRequest,
+        ): Promise<CreateTerminalResponse> => {
+          return this.handleCreateTerminal(params);
+        },
+        terminalOutput: async (
+          params: TerminalOutputRequest,
+        ): Promise<TerminalOutputResponse> => {
+          return this.handleTerminalOutput(params);
+        },
+        waitForTerminalExit: async (
+          params: WaitForTerminalExitRequest,
+        ): Promise<WaitForTerminalExitResponse> => {
+          return this.handleWaitForTerminalExit(params);
+        },
+        killTerminal: async (
+          params: KillTerminalCommandRequest,
+        ): Promise<KillTerminalCommandResponse> => {
+          return this.handleKillTerminal(params);
+        },
+        releaseTerminal: async (
+          params: ReleaseTerminalRequest,
+        ): Promise<ReleaseTerminalResponse> => {
+          return this.handleReleaseTerminal(params);
+        },
+      }),
+      stream,
+    );
+
+    try {
+      const initResult = await connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true,
+          },
+          terminal: true,
+        },
+        clientInfo: {
+          name: "acpx",
+          version: "0.1.0",
+        },
+      });
+
+      this.connection = connection;
+      this.agent = child;
+      this.initResult = initResult;
+      this.log(`initialized protocol version ${initResult.protocolVersion}`);
+    } catch (error) {
+      child.kill();
+      throw error;
+    }
+  }
+
+  async createSession(cwd = this.options.cwd): Promise<string> {
+    const connection = this.getConnection();
+    const result = await connection.newSession({
+      cwd: asAbsoluteCwd(cwd),
+      mcpServers: [],
+    });
+    return result.sessionId;
+  }
+
+  async loadSession(sessionId: string, cwd = this.options.cwd): Promise<void> {
+    const connection = this.getConnection();
+    await connection.loadSession({
+      sessionId,
+      cwd: asAbsoluteCwd(cwd),
+      mcpServers: [],
+    });
+  }
+
+  async prompt(sessionId: string, text: string): Promise<PromptResponse> {
+    const connection = this.getConnection();
+    return connection.prompt({
+      sessionId,
+      prompt: [
+        {
+          type: "text",
+          text,
+        },
+      ],
+    });
+  }
+
+  async close(): Promise<void> {
+    for (const terminalId of [...this.terminals.keys()]) {
+      await this.releaseTerminalById(terminalId);
+    }
+
+    if (this.agent && !this.agent.killed) {
+      this.agent.kill();
+    }
+
+    this.connection = undefined;
+    this.agent = undefined;
+  }
+
+  private getConnection(): ClientSideConnection {
+    if (!this.connection) {
+      throw new Error("ACP client not started");
+    }
+    return this.connection;
+  }
+
+  private log(message: string): void {
+    if (!this.options.verbose) {
+      return;
+    }
+    process.stderr.write(`[acpx] ${message}\n`);
+  }
+
+  private async handlePermissionRequest(
+    params: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const response = await resolvePermissionRequest(
+      params,
+      this.options.permissionMode,
+    );
+
+    const decision = classifyPermissionDecision(params, response);
+    this.permissionStats.requested += 1;
+    if (decision === "approved") {
+      this.permissionStats.approved += 1;
+    } else if (decision === "denied") {
+      this.permissionStats.denied += 1;
+    } else {
+      this.permissionStats.cancelled += 1;
+    }
+
+    return response;
+  }
+
+  private async handleReadTextFile(
+    params: ReadTextFileRequest,
+  ): Promise<ReadTextFileResponse> {
+    const content = await fs.readFile(params.path, "utf8");
+    if (params.line == null && params.limit == null) {
+      return { content };
+    }
+
+    const lines = content.split("\n");
+    const start = Math.max(0, (params.line ?? 1) - 1);
+    const end = params.limit == null ? lines.length : start + Math.max(params.limit, 0);
+    return {
+      content: lines.slice(start, end).join("\n"),
+    };
+  }
+
+  private async handleWriteTextFile(
+    params: WriteTextFileRequest,
+  ): Promise<WriteTextFileResponse> {
+    await fs.mkdir(path.dirname(params.path), { recursive: true });
+    await fs.writeFile(params.path, params.content, "utf8");
+    return {};
+  }
+
+  private async handleCreateTerminal(
+    params: CreateTerminalRequest,
+  ): Promise<CreateTerminalResponse> {
+    const outputByteLimit = Math.max(
+      1,
+      params.outputByteLimit ?? DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES,
+    );
+
+    const proc = spawn(params.command, params.args ?? [], {
+      cwd: params.cwd ?? this.options.cwd,
+      env: toEnvObject(params.env),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    await waitForSpawn(proc);
+
+    const terminalId = randomUUID();
+    const terminal: InternalTerminal = {
+      process: proc,
+      output: Buffer.alloc(0),
+      truncated: false,
+      outputByteLimit,
+      exitCode: undefined,
+      signal: undefined,
+      waiters: [],
+    };
+
+    const appendOutput = (chunk: Buffer | string): void => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      terminal.output = Buffer.concat([terminal.output, buf]);
+
+      if (terminal.output.length > terminal.outputByteLimit) {
+        terminal.output = terminal.output.subarray(
+          terminal.output.length - terminal.outputByteLimit,
+        );
+        terminal.truncated = true;
+      }
+    };
+
+    proc.stdout.on("data", appendOutput);
+    proc.stderr.on("data", appendOutput);
+
+    proc.once("exit", (exitCode, signal) => {
+      terminal.exitCode = exitCode;
+      terminal.signal = signal;
+      const response: WaitForTerminalExitResponse = {
+        exitCode: exitCode ?? null,
+        signal: signal ?? null,
+      };
+      for (const waiter of terminal.waiters.splice(0)) {
+        waiter(response);
+      }
+    });
+
+    this.terminals.set(terminalId, terminal);
+    return { terminalId };
+  }
+
+  private async handleTerminalOutput(
+    params: TerminalOutputRequest,
+  ): Promise<TerminalOutputResponse> {
+    const terminal = this.getTerminal(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Unknown terminal: ${params.terminalId}`);
+    }
+
+    const hasExitStatus = terminal.exitCode !== undefined || terminal.signal !== undefined;
+
+    return {
+      output: terminal.output.toString("utf8"),
+      truncated: terminal.truncated,
+      exitStatus: hasExitStatus
+        ? {
+            exitCode: terminal.exitCode ?? null,
+            signal: terminal.signal ?? null,
+          }
+        : undefined,
+    };
+  }
+
+  private async handleWaitForTerminalExit(
+    params: WaitForTerminalExitRequest,
+  ): Promise<WaitForTerminalExitResponse> {
+    const terminal = this.getTerminal(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Unknown terminal: ${params.terminalId}`);
+    }
+
+    if (terminal.exitCode !== undefined || terminal.signal !== undefined) {
+      return {
+        exitCode: terminal.exitCode ?? null,
+        signal: terminal.signal ?? null,
+      };
+    }
+
+    return new Promise<WaitForTerminalExitResponse>((resolve) => {
+      terminal.waiters.push(resolve);
+    });
+  }
+
+  private async handleKillTerminal(
+    params: KillTerminalCommandRequest,
+  ): Promise<KillTerminalCommandResponse> {
+    const terminal = this.getTerminal(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Unknown terminal: ${params.terminalId}`);
+    }
+
+    if (!terminal.process.killed) {
+      terminal.process.kill();
+    }
+
+    return {};
+  }
+
+  private async handleReleaseTerminal(
+    params: ReleaseTerminalRequest,
+  ): Promise<ReleaseTerminalResponse> {
+    await this.releaseTerminalById(params.terminalId);
+    return {};
+  }
+
+  private async releaseTerminalById(terminalId: string): Promise<void> {
+    const terminal = this.getTerminal(terminalId);
+    if (!terminal) {
+      return;
+    }
+
+    if (!terminal.process.killed) {
+      terminal.process.kill();
+    }
+
+    this.terminals.delete(terminalId);
+  }
+
+  private getTerminal(terminalId: string): InternalTerminal | undefined {
+    return this.terminals.get(terminalId);
+  }
+}
