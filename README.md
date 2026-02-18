@@ -1,8 +1,13 @@
 # acpx
 
-Headless CLI client for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com).
+```bash
+acpx codex "find the flaky test and fix it"
+# Resumes this repo's session, streams structured tool/activity updates, and keeps context for the next turn.
+```
 
-`acpx` is built for scriptable, session-aware agent usage from the terminal.
+`acpx` is a headless CLI client for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com), so you can run coding agents from scripts and terminals without PTY scraping.
+
+Use one command surface for Codex, Claude, Gemini, or custom ACP servers, keep persistent (and named) multi-turn sessions, and queue prompts while another one is still running.
 
 ## Install
 
