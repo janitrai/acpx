@@ -132,13 +132,13 @@ acpx --format quiet codex 'give me a 3-line summary'
 
 Built-ins:
 
-| Agent | Adapter | Wraps |
-|-------|---------|-------|
-| `codex` | [codex-acp](https://github.com/zed-industries/codex-acp) | [Codex CLI](https://codex.openai.com) |
-| `claude` | [claude-agent-acp](https://github.com/zed-industries/claude-agent-acp) | [Claude Code](https://claude.ai/code) |
-| `gemini` | native | [Gemini CLI](https://github.com/google/gemini-cli) |
-| `opencode` | native | [OpenCode](https://opencode.ai) |
-| `pi` | [pi-acp](https://github.com/svkozak/pi-acp) | [Pi Coding Agent](https://github.com/mariozechner/pi) |
+| Agent      | Adapter                                                                | Wraps                                                 |
+| ---------- | ---------------------------------------------------------------------- | ----------------------------------------------------- |
+| `codex`    | [codex-acp](https://github.com/zed-industries/codex-acp)               | [Codex CLI](https://codex.openai.com)                 |
+| `claude`   | [claude-agent-acp](https://github.com/zed-industries/claude-agent-acp) | [Claude Code](https://claude.ai/code)                 |
+| `gemini`   | native                                                                 | [Gemini CLI](https://github.com/google/gemini-cli)    |
+| `opencode` | native                                                                 | [OpenCode](https://opencode.ai)                       |
+| `pi`       | [pi-acp](https://github.com/svkozak/pi-acp)                            | [Pi Coding Agent](https://github.com/mariozechner/pi) |
 
 Use `--agent` as an escape hatch for custom ACP servers:
 

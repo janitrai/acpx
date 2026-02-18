@@ -61,9 +61,7 @@ function asStatus(status: ToolCallStatus | null | undefined): NormalizedToolStat
   return status ?? "unknown";
 }
 
-function isFinalStatus(
-  status: NormalizedToolStatus,
-): status is "completed" | "failed" {
+function isFinalStatus(status: NormalizedToolStatus): status is "completed" | "failed" {
   return status === "completed" || status === "failed";
 }
 
@@ -237,7 +235,9 @@ function summarizeToolInput(rawInput: unknown): string | undefined {
   return json ? toInline(json) : undefined;
 }
 
-function formatLocations(locations: Array<ToolCallLocation> | null | undefined): string | undefined {
+function formatLocations(
+  locations: Array<ToolCallLocation> | null | undefined,
+): string | undefined {
   if (!locations || locations.length === 0) {
     return undefined;
   }
@@ -270,7 +270,11 @@ function formatLocations(locations: Array<ToolCallLocation> | null | undefined):
   return `${visible.join(", ")}, +${hidden} more`;
 }
 
-function summarizeDiff(path: string, oldText: string | null | undefined, newText: string): string {
+function summarizeDiff(
+  path: string,
+  oldText: string | null | undefined,
+  newText: string,
+): string {
   const oldLines = oldText ? oldText.split("\n").length : 0;
   const newLines = newText.split("\n").length;
   const delta = newLines - oldLines;
@@ -306,7 +310,9 @@ function textFromContentBlock(content: ContentBlock): string | undefined {
   }
 }
 
-function summarizeToolContent(content: Array<ToolCallContent> | null | undefined): string | undefined {
+function summarizeToolContent(
+  content: Array<ToolCallContent> | null | undefined,
+): string | undefined {
   if (!content || content.length === 0) {
     return undefined;
   }
@@ -333,7 +339,9 @@ function summarizeToolContent(content: Array<ToolCallContent> | null | undefined
   }
 
   const unique = dedupeStrings(
-    fragments.map((fragment) => fragment.trim()).filter((fragment) => fragment.length > 0),
+    fragments
+      .map((fragment) => fragment.trim())
+      .filter((fragment) => fragment.length > 0),
   );
   if (unique.length === 0) {
     return undefined;
@@ -593,7 +601,10 @@ class TextOutputFormatter implements OutputFormatter {
     return created;
   }
 
-  private mergeToolState(state: ToolRenderState, update: ToolCall | ToolCallUpdate): void {
+  private mergeToolState(
+    state: ToolRenderState,
+    update: ToolCall | ToolCallUpdate,
+  ): void {
     if (typeof update.title === "string" && update.title.trim().length > 0) {
       state.title = update.title;
     }

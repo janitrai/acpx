@@ -479,9 +479,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function isPermissionMode(value: unknown): value is PermissionMode {
-  return (
-    value === "approve-all" || value === "approve-reads" || value === "deny-all"
-  );
+  return value === "approve-all" || value === "approve-reads" || value === "deny-all";
 }
 
 function parseQueueOwnerRecord(raw: unknown): QueueOwnerRecord | null {
@@ -792,7 +790,9 @@ async function connectToSocket(socketPath: string): Promise<net.Socket> {
   });
 }
 
-async function connectToQueueOwner(owner: QueueOwnerRecord): Promise<net.Socket | undefined> {
+async function connectToQueueOwner(
+  owner: QueueOwnerRecord,
+): Promise<net.Socket | undefined> {
   let lastError: unknown;
 
   for (let attempt = 0; attempt < QUEUE_CONNECT_ATTEMPTS; attempt += 1) {
@@ -878,11 +878,11 @@ class SessionQueueOwner {
   }
 
   static async start(lease: QueueOwnerLease): Promise<SessionQueueOwner> {
-    let owner: SessionQueueOwner | undefined;
+    const ownerRef: { current: SessionQueueOwner | undefined } = { current: undefined };
     const server = net.createServer((socket) => {
-      owner?.handleConnection(socket);
+      ownerRef.current?.handleConnection(socket);
     });
-    owner = new SessionQueueOwner(server);
+    ownerRef.current = new SessionQueueOwner(server);
 
     await new Promise<void>((resolve, reject) => {
       const onListening = () => {
@@ -899,7 +899,7 @@ class SessionQueueOwner {
       server.listen(lease.socketPath);
     });
 
-    return owner;
+    return ownerRef.current!;
   }
 
   async close(): Promise<void> {
@@ -937,13 +937,16 @@ class SessionQueueOwner {
     }
 
     return await new Promise<QueueTask | undefined>((resolve) => {
-      const timer = setTimeout(() => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) {
-          this.waiters.splice(index, 1);
-        }
-        resolve(undefined);
-      }, Math.max(0, timeoutMs));
+      const timer = setTimeout(
+        () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) {
+            this.waiters.splice(index, 1);
+          }
+          resolve(undefined);
+        },
+        Math.max(0, timeoutMs),
+      );
 
       const waiter = (task: QueueTask | undefined) => {
         clearTimeout(timer);
@@ -1213,7 +1216,9 @@ async function submitToQueueOwner(
       }
 
       if (!acknowledged) {
-        finishReject(new Error("Queue owner disconnected before acknowledging request"));
+        finishReject(
+          new Error("Queue owner disconnected before acknowledging request"),
+        );
         return;
       }
 
