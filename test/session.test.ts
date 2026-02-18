@@ -98,7 +98,7 @@ test("findSession skips closed sessions by default and includes them when reques
   });
 });
 
-test("findSessionByDirectoryWalk returns the nearest active session by walking up directories", async () => {
+test("findSessionByDirectoryWalk returns the nearest active session within git root boundary", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();
 
@@ -106,6 +106,7 @@ test("findSessionByDirectoryWalk returns the nearest active session by walking u
     const packagesDir = path.join(repoRoot, "packages");
     const nestedDir = path.join(packagesDir, "app");
 
+    await fs.mkdir(path.join(repoRoot, ".git"), { recursive: true });
     await fs.mkdir(nestedDir, { recursive: true });
 
     await writeSessionRecord(
@@ -126,10 +127,23 @@ test("findSessionByDirectoryWalk returns the nearest active session by walking u
         cwd: packagesDir,
       }),
     );
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-home",
+        sessionId: "session-home",
+        agentCommand: "agent-a",
+        cwd: homeDir,
+      }),
+    );
+
+    const boundary = session.findGitRepositoryRoot(nestedDir);
+    assert.equal(boundary, repoRoot);
 
     const found = await session.findSessionByDirectoryWalk({
       agentCommand: "agent-a",
       cwd: nestedDir,
+      boundary,
     });
 
     assert.equal(found?.id, "session-packages");
@@ -144,6 +158,7 @@ test("findSessionByDirectoryWalk matches named sessions and skips closed session
     const packagesDir = path.join(repoRoot, "packages");
     const nestedDir = path.join(packagesDir, "app");
 
+    await fs.mkdir(path.join(repoRoot, ".git"), { recursive: true });
     await fs.mkdir(nestedDir, { recursive: true });
 
     await writeSessionRecord(
@@ -177,18 +192,71 @@ test("findSessionByDirectoryWalk matches named sessions and skips closed session
       }),
     );
 
+    const boundary = session.findGitRepositoryRoot(nestedDir);
+    assert.equal(boundary, repoRoot);
+
     const foundDefault = await session.findSessionByDirectoryWalk({
       agentCommand: "agent-a",
       cwd: nestedDir,
+      boundary,
     });
     const foundNamed = await session.findSessionByDirectoryWalk({
       agentCommand: "agent-a",
       cwd: nestedDir,
       name: "frontend",
+      boundary,
     });
 
     assert.equal(foundDefault?.id, "session-default");
     assert.equal(foundNamed?.id, "session-named");
+  });
+});
+
+test("findSessionByDirectoryWalk falls back to exact cwd matching when no git root exists", async () => {
+  await withTempHome(async (homeDir) => {
+    const session = await loadSessionModule();
+
+    const parentDir = path.join(homeDir, "outside-git");
+    const nestedDir = path.join(parentDir, "project");
+
+    await fs.mkdir(nestedDir, { recursive: true });
+
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-parent",
+        sessionId: "session-parent",
+        agentCommand: "agent-a",
+        cwd: parentDir,
+      }),
+    );
+
+    const gitRoot = session.findGitRepositoryRoot(nestedDir);
+    assert.equal(gitRoot, undefined);
+
+    const missed = await session.findSessionByDirectoryWalk({
+      agentCommand: "agent-a",
+      cwd: nestedDir,
+      boundary: gitRoot ?? nestedDir,
+    });
+    assert.equal(missed, undefined);
+
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-nested",
+        sessionId: "session-nested",
+        agentCommand: "agent-a",
+        cwd: nestedDir,
+      }),
+    );
+
+    const found = await session.findSessionByDirectoryWalk({
+      agentCommand: "agent-a",
+      cwd: nestedDir,
+      boundary: gitRoot ?? nestedDir,
+    });
+    assert.equal(found?.id, "session-nested");
   });
 });
 

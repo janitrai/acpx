@@ -1,5 +1,6 @@
 import type { SessionNotification, StopReason } from "@agentclientprotocol/sdk";
 import { createHash, randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -261,6 +262,43 @@ function toPromptResult(
 
 function absolutePath(value: string): string {
   return path.resolve(value);
+}
+
+function hasGitDirectory(dir: string): boolean {
+  const gitPath = path.join(dir, ".git");
+  try {
+    return statSync(gitPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isWithinBoundary(boundary: string, target: string): boolean {
+  const relative = path.relative(boundary, target);
+  return (
+    relative.length === 0 || (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
+export function findGitRepositoryRoot(startDir: string): string | undefined {
+  let current = absolutePath(startDir);
+  const root = path.parse(current).root;
+
+  for (;;) {
+    if (hasGitDirectory(current)) {
+      return current;
+    }
+
+    if (current === root) {
+      return undefined;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
 }
 
 function normalizeName(value: string | undefined): string | undefined {
@@ -1636,6 +1674,7 @@ type FindSessionByDirectoryWalkOptions = {
   agentCommand: string;
   cwd: string;
   name?: string;
+  boundary?: string;
 };
 
 export async function listSessionsForAgent(
@@ -1674,6 +1713,10 @@ export async function findSessionByDirectoryWalk(
 ): Promise<SessionRecord | undefined> {
   const normalizedName = normalizeName(options.name);
   const normalizedStart = absolutePath(options.cwd);
+  const normalizedBoundary = absolutePath(options.boundary ?? normalizedStart);
+  const walkBoundary = isWithinBoundary(normalizedBoundary, normalizedStart)
+    ? normalizedBoundary
+    : normalizedStart;
   const sessions = await listSessionsForAgent(options.agentCommand);
 
   const matchesScope = (session: SessionRecord, dir: string): boolean => {
@@ -1693,7 +1736,6 @@ export async function findSessionByDirectoryWalk(
   };
 
   let dir = normalizedStart;
-  const root = path.parse(dir).root;
 
   for (;;) {
     const match = sessions.find((session) => matchesScope(session, dir));
@@ -1701,7 +1743,7 @@ export async function findSessionByDirectoryWalk(
       return match;
     }
 
-    if (dir === root) {
+    if (dir === walkBoundary) {
       return undefined;
     }
 

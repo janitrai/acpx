@@ -28,12 +28,14 @@ Soft-closed records stay on disk and are visible in `sessions list`.
 
 For prompt commands:
 
-1. `findSessionByDirectoryWalk` searches for the nearest active (non-closed) record by walking up from the current `cwd` (or `--cwd`) to `/`.
-   - at each level, it checks for a matching `(agentCommand, dir, name?)` record
-2. If no record exists anywhere up the tree, prompt exits with a "no session found" error and instructs the user to create one via `sessions new`.
-3. `sendSession` starts a fresh adapter process and tries `loadSession`.
-4. If load is unsupported or fails with known not-found/invalid errors, it falls back to `newSession`.
-5. After prompt completes, record metadata is updated and re-written (`closed` cleared if needed).
+1. `findGitRepositoryRoot` checks for `.git` while walking up from current `cwd` (or `--cwd`) to find the nearest repo root.
+2. `findSessionByDirectoryWalk` searches for the nearest active (non-closed) record from current `cwd` up to that git root (inclusive).
+   - if no git root is found, lookup is exact-cwd only (no parent walk)
+   - at each checked level, it matches `(agentCommand, dir, name?)`
+3. If no record exists in that bounded scope, prompt exits with a "no session found" error and instructs the user to create one via `sessions new`.
+4. `sendSession` starts a fresh adapter process and tries `loadSession`.
+5. If load is unsupported or fails with known not-found/invalid errors, it falls back to `newSession`.
+6. After prompt completes, record metadata is updated and re-written (`closed` cleared if needed).
 
 ## Named sessions
 
