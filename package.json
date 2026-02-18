@@ -1,7 +1,7 @@
 {
   "name": "acpx",
   "version": "0.1.2",
-  "description": "Headless CLI client for the Agent Client Protocol (ACP) — talk to coding agents from the command line",
+  "description": "Headless CLI client for the Agent Client Protocol (ACP) \u2014 talk to coding agents from the command line",
   "type": "module",
   "files": [
     "dist",
@@ -18,7 +18,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --max-warnings=0",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "release": "release-it",
+    "release:ci": "release-it --ci"
   },
   "keywords": [
     "acp",
@@ -48,9 +50,27 @@
     "eslint": "^10.0.0",
     "globals": "^17.3.0",
     "prettier": "^3.8.1",
+    "release-it": "^19.2.4",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.0"
+  },
+  "release-it": {
+    "git": {
+      "requireCleanWorkingDir": true,
+      "requireBranch": "main",
+      "commitMessage": "chore(release): ${version}",
+      "tagName": "v${version}",
+      "push": true
+    },
+    "npm": {
+      "publish": true,
+      "skipChecks": true
+    },
+    "github": {
+      "release": true,
+      "autoGenerate": true
+    }
   }
 }
