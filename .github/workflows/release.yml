@@ -33,8 +33,21 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm run release:ci -- --increment ${{ inputs.increment }}
+      # Fetch latest version from npm, bump it, write to package.json.
+      # Nothing is committed — the bumped version lives only in the CI
+      # runner's working directory. release-it tags + publishes from it.
+      - name: Bump version from npm registry
+        run: |
+          LATEST=$(npm view acpx version 2>/dev/null || echo "0.0.0")
+          echo "Latest on npm: $LATEST"
+          npm version --no-git-tag-version "$LATEST" --allow-same-version
+          npm version --no-git-tag-version ${{ inputs.increment }}
+          VERSION=$(node -p 'require("./package.json").version')
+          echo "Releasing: $VERSION"
+      - name: Release
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          npm run release:ci -- --increment "$VERSION"
         env:
-          DEBUG: release-it:config
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_DEBUG: release-it:config
+          NPM_CONFIG_PROVENANCE: "true"
