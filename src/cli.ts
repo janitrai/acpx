@@ -174,9 +174,8 @@ function addGlobalFlags(command: Command): Command {
     )
     .option(
       "--ttl <seconds>",
-      "Queue owner idle TTL before shutdown (0 uses default TTL)",
+      "Queue owner idle TTL before shutdown (0 = keep alive forever) (default: 300)",
       parseTtlSeconds,
-      DEFAULT_QUEUE_OWNER_TTL_MS,
     )
     .option("--verbose", "Enable verbose debug logs");
 }

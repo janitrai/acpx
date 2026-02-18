@@ -191,7 +191,7 @@ test("normalizeQueueOwnerTtlMs applies default and edge-case normalization", asy
     );
     assert.equal(
       session.normalizeQueueOwnerTtlMs(0),
-      session.DEFAULT_QUEUE_OWNER_TTL_MS,
+      0, // 0 means keep alive forever
     );
     assert.equal(
       session.normalizeQueueOwnerTtlMs(-1),

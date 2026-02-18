@@ -281,10 +281,11 @@ export function normalizeQueueOwnerTtlMs(ttlMs: number | undefined): number {
     return DEFAULT_QUEUE_OWNER_TTL_MS;
   }
 
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+  if (!Number.isFinite(ttlMs) || ttlMs < 0) {
     return DEFAULT_QUEUE_OWNER_TTL_MS;
   }
 
+  // 0 means keep alive forever (no TTL)
   return Math.round(ttlMs);
 }
 
