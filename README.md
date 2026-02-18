@@ -1,6 +1,8 @@
 # acpx
 
-Talk to coding agents from the command line. One CLI for Codex, Claude, Gemini, or any custom ACP server — with persistent sessions, prompt queueing, and structured output instead of terminal scraping.
+`acpx` is a headless CLI client for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com), so you can run coding agents from scripts and terminals without PTY scraping.
+
+Use one command surface for Codex, Claude, Gemini, OpenCode, Pi, or custom ACP servers, keep persistent (and named) multi-turn sessions, and queue prompts while another one is still running.
 
 ```bash
 $ acpx codex "find the flaky test and fix it"
