@@ -18,6 +18,7 @@ import {
   closeSession,
   createSession,
   findSession,
+  findSessionByDirectoryWalk,
   listSessionsForAgent,
   runOnce,
   sendSession,
@@ -29,6 +30,13 @@ import {
   type PermissionMode,
   type SessionRecord,
 } from "./types.js";
+
+class NoSessionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoSessionError";
+  }
+}
 
 type PermissionFlags = {
   approveAll?: boolean;
@@ -339,6 +347,35 @@ function printQueuedPromptByFormat(
   process.stdout.write(`[queued] ${result.requestId}\n`);
 }
 
+function formatSessionLabel(record: SessionRecord): string {
+  return record.name ?? "cwd";
+}
+
+function printPromptSessionBanner(record: SessionRecord, format: OutputFormat): void {
+  if (format === "quiet") {
+    return;
+  }
+
+  const label = formatSessionLabel(record);
+  process.stderr.write(`[acpx] session ${label} (${record.id})\n`);
+  process.stderr.write(`[acpx] cwd: ${record.cwd}\n`);
+}
+
+function printCreatedSessionBanner(
+  record: SessionRecord,
+  agentName: string,
+  format: OutputFormat,
+): void {
+  if (format === "quiet") {
+    return;
+  }
+
+  const label = formatSessionLabel(record);
+  process.stderr.write(`[acpx] created session ${label} (${record.id})\n`);
+  process.stderr.write(`[acpx] agent: ${agentName}\n`);
+  process.stderr.write(`[acpx] cwd: ${record.cwd}\n`);
+}
+
 async function handlePrompt(
   explicitAgentName: string | undefined,
   promptParts: string[],
@@ -351,27 +388,23 @@ async function handlePrompt(
   const outputFormatter = createOutputFormatter(globalFlags.format);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
 
-  let record = await findSession({
+  const record = await findSessionByDirectoryWalk({
     agentCommand: agent.agentCommand,
     cwd: agent.cwd,
     name: flags.session,
   });
 
   if (!record) {
-    record = await createSession({
-      agentCommand: agent.agentCommand,
-      cwd: agent.cwd,
-      name: flags.session,
-      permissionMode,
-      timeoutMs: globalFlags.timeout,
-      verbose: globalFlags.verbose,
-    });
-
-    if (globalFlags.verbose) {
-      const scope = flags.session ? `named session "${flags.session}"` : "cwd session";
-      process.stderr.write(`[acpx] created ${scope}: ${record.id}\n`);
-    }
+    const root = path.parse(agent.cwd).root || "/";
+    const createCmd = flags.session
+      ? `acpx ${agent.agentName} sessions new --name ${flags.session}`
+      : `acpx ${agent.agentName} sessions new`;
+    throw new NoSessionError(
+      `⚠ No acpx session found (searched up to ${root}).\nCreate one: ${createCmd}`,
+    );
   }
+
+  printPromptSessionBanner(record, globalFlags.format);
 
   const result = await sendSession({
     sessionId: record.id,
@@ -490,6 +523,8 @@ async function handleSessionsNew(
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
+
+  printCreatedSessionBanner(created, agent.agentName, globalFlags.format);
 
   if (globalFlags.verbose) {
     const scope = flags.name ? `named session "${flags.name}"` : "cwd session";
@@ -719,6 +754,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     "after",
     `
 Examples:
+  acpx codex sessions new
   acpx codex "fix the tests"
   acpx codex prompt "fix the tests"
   acpx codex --no-wait "queue follow-up task"
@@ -757,6 +793,11 @@ Examples:
     if (error instanceof TimeoutError) {
       process.stderr.write(`${error.message}\n`);
       process.exit(EXIT_CODES.TIMEOUT);
+    }
+
+    if (error instanceof NoSessionError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exit(EXIT_CODES.NO_SESSION);
     }
 
     const message = error instanceof Error ? error.message : String(error);

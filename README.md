@@ -17,6 +17,7 @@ One command surface for Codex, Claude, Gemini, OpenCode, Pi, or custom ACP serve
 - **One-shot mode**: `exec` for stateless fire-and-forget tasks
 
 ```bash
+$ acpx codex sessions new
 $ acpx codex "find the flaky test and fix it"
 
 [thinking] Investigating test suite for flaky failures
@@ -95,13 +96,16 @@ The only prerequisite is the underlying coding agent you want to use:
 ## Usage examples
 
 ```bash
-acpx codex 'fix the tests'                     # implicit prompt (persistent session)
+acpx codex sessions new                        # create a session (explicit) for this project dir
+acpx codex 'fix the tests'                     # implicit prompt (routes via directory-walk)
 acpx codex prompt 'fix the tests'              # explicit prompt subcommand
 acpx codex --no-wait 'draft test migration plan' # enqueue without waiting if session is busy
 acpx exec 'summarize this repo'                # default agent shortcut (codex)
 acpx codex exec 'what does this repo do?'      # one-shot, no saved session
 
-acpx codex -s api 'implement cursor pagination' # named session
+acpx codex sessions new --name api              # create named session
+acpx codex -s api 'implement cursor pagination' # prompt in named session
+acpx codex sessions new --name docs             # create another named session
 acpx codex -s docs 'rewrite API docs'           # parallel work in another named session
 
 acpx codex sessions              # list sessions for codex command
@@ -181,8 +185,9 @@ acpx --agent ./my-custom-acp-server 'do something'
 
 ## Session behavior
 
-- Prompt commands use saved sessions scoped to `(agent command, cwd, optional name)`.
-- `-s <name>` creates/selects a parallel named session in the same repo.
+- Prompt commands require an existing saved session record (created via `sessions new`).
+- Prompts route by walking up the directory tree (like `git`) from `cwd` (or `--cwd`) and selecting the nearest active session matching `(agent command, dir, optional name)`.
+- `-s <name>` selects a parallel named session during that directory walk.
 - `sessions new [--name <name>]` creates a fresh session for that scope and soft-closes the prior one.
 - `sessions close [name]` soft-closes the session: queue owner/processes are terminated, record is kept with `closed: true`.
 - Auto-resume for cwd scope skips sessions marked closed.

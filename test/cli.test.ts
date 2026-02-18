@@ -85,6 +85,21 @@ test("--ttl flag is parsed for sessions commands", async () => {
   });
 });
 
+test("prompt exits with NO_SESSION when no session exists (no auto-create)", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace", "packages", "app");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(["--cwd", cwd, "codex", "hello"], homeDir);
+
+    assert.equal(result.code, 4);
+    assert.match(
+      result.stderr,
+      /⚠ No acpx session found \(searched up to \/\)\.\nCreate one: acpx codex sessions new\n?/,
+    );
+  });
+});
+
 async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<void> {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-cli-test-home-"));
   try {

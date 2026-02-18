@@ -222,12 +222,12 @@ Session records are stored in:
 
 For prompt commands:
 
-1. Find session by `(agentCommand, absoluteCwd, optionalName)`
-   - closed sessions are skipped for automatic scope-based lookup
-2. If missing, create and persist a new session record
-3. On send, attempt `loadSession` when the adapter supports it
-4. If load fails with not-found/invalid-session style errors, create a fresh session and update record
-5. Save updated `lastUsedAt`, capabilities, and session id metadata
+1. Walk up the directory tree from `absoluteCwd` to `/` (like `git`).
+2. At each directory, find the first active (non-closed) session matching `(agentCommand, dir, optionalName)`.
+3. If found, use that session record for prompt queueing and resume attempts.
+4. If not found, exit with code `4` and print guidance to create one via `sessions new`.
+
+`sessions new [--name <name>]` is the explicit creation point for saved session records.
 
 ### Prompt queueing
 
@@ -251,7 +251,7 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 
 ### CWD scoping
 
-`--cwd` changes session scope. The same session name in two different cwd values maps to different records.
+`--cwd` sets the starting point for directory-walk routing (and the exact scope directory when creating sessions via `sessions new`).
 
 ## Output formats
 
@@ -300,7 +300,8 @@ Prompting behavior in `--approve-reads`:
 | `1`   | Agent/protocol/runtime error                                                               |
 | `2`   | CLI usage error                                                                            |
 | `3`   | Timeout                                                                                    |
-| `4`   | Permission denied (permission requested, none approved, and at least one denied/cancelled) |
+| `4`   | No session found (prompt requires an explicit `sessions new`)                              |
+| `5`   | Permission denied (permission requested, none approved, and at least one denied/cancelled) |
 | `130` | Interrupted (`SIGINT`/`SIGTERM`)                                                           |
 
 ## Environment variables
@@ -316,6 +317,7 @@ Related runtime behavior:
 
 ```bash
 # Review a PR in a dedicated named session
+acpx --cwd ~/repos/shop codex sessions new --name pr-842
 acpx --cwd ~/repos/shop codex -s pr-842 \
   'Review PR #842, list risks, and propose a minimal patch'
 
@@ -324,6 +326,8 @@ acpx --cwd ~/repos/shop codex -s pr-842 \
   'Now draft commit message and rollout checklist'
 
 # Parallel workstreams in one repo
+acpx codex sessions new --name backend
+acpx codex sessions new --name docs
 acpx codex -s backend 'fix checkout timeout'
 acpx codex -s docs 'document payment retry behavior'
 

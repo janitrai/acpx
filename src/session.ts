@@ -1632,6 +1632,12 @@ type FindSessionOptions = {
   includeClosed?: boolean;
 };
 
+type FindSessionByDirectoryWalkOptions = {
+  agentCommand: string;
+  cwd: string;
+  name?: string;
+};
+
 export async function listSessionsForAgent(
   agentCommand: string,
 ): Promise<SessionRecord[]> {
@@ -1661,6 +1667,50 @@ export async function findSession(
 
     return session.name === normalizedName;
   });
+}
+
+export async function findSessionByDirectoryWalk(
+  options: FindSessionByDirectoryWalkOptions,
+): Promise<SessionRecord | undefined> {
+  const normalizedName = normalizeName(options.name);
+  const normalizedStart = absolutePath(options.cwd);
+  const sessions = await listSessionsForAgent(options.agentCommand);
+
+  const matchesScope = (session: SessionRecord, dir: string): boolean => {
+    if (session.cwd !== dir) {
+      return false;
+    }
+
+    if (session.closed) {
+      return false;
+    }
+
+    if (normalizedName == null) {
+      return session.name == null;
+    }
+
+    return session.name === normalizedName;
+  };
+
+  let dir = normalizedStart;
+  const root = path.parse(dir).root;
+
+  for (;;) {
+    const match = sessions.find((session) => matchesScope(session, dir));
+    if (match) {
+      return match;
+    }
+
+    if (dir === root) {
+      return undefined;
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return undefined;
+    }
+    dir = parent;
+  }
 }
 
 async function terminateQueueOwnerForSession(sessionId: string): Promise<void> {

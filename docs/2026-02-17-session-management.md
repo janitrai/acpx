@@ -12,7 +12,7 @@ date: 2026-02-18
 Session lookup is scoped by:
 
 - agent command
-- cwd
+- a scope directory (session is created at a directory; prompts route to the nearest parent scope)
 - optional session name (`-s <name>`)
 
 No `-s` means the default cwd session for that agent command.
@@ -28,21 +28,23 @@ Soft-closed records stay on disk and are visible in `sessions list`.
 
 For prompt commands:
 
-1. `findSession` searches stored records by `(agentCommand, cwd, name?)`.
-   - auto-resume skips records marked `closed: true`.
-2. If no record exists, `createSession` creates ACP session + record.
+1. `findSessionByDirectoryWalk` searches for the nearest active (non-closed) record by walking up from the current `cwd` (or `--cwd`) to `/`.
+   - at each level, it checks for a matching `(agentCommand, dir, name?)` record
+2. If no record exists anywhere up the tree, prompt exits with a "no session found" error and instructs the user to create one via `sessions new`.
 3. `sendSession` starts a fresh adapter process and tries `loadSession`.
 4. If load is unsupported or fails with known not-found/invalid errors, it falls back to `newSession`.
 5. After prompt completes, record metadata is updated and re-written (`closed` cleared if needed).
 
 ## Named sessions
 
-`-s backend` creates a parallel conversation stream for the same agent and cwd.
+`-s backend` selects a parallel conversation stream for the same agent, routed via the same directory-walk behavior.
 
 Example:
 
-- default session: `acpx codex 'fix tests'`
-- named session: `acpx codex -s backend 'fix API'`
+- create default session: `acpx codex sessions new`
+- create named session: `acpx codex sessions new --name backend`
+- default prompt: `acpx codex 'fix tests'`
+- named prompt: `acpx codex -s backend 'fix API'`
 
 Both can coexist because names are part of the scope key.
 

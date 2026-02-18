@@ -9,7 +9,8 @@ export const EXIT_CODES = {
   ERROR: 1,
   USAGE: 2,
   TIMEOUT: 3,
-  PERMISSION_DENIED: 4,
+  NO_SESSION: 4,
+  PERMISSION_DENIED: 5,
   INTERRUPTED: 130,
 } as const;
 

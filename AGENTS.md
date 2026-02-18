@@ -30,7 +30,7 @@ acpx spawns the ACP adapter as a child process and communicates over stdio using
 ```bash
 acpx <agent> [prompt] <text>
 acpx <agent> exec <text>
-acpx <agent> sessions [list|close]
+acpx <agent> sessions [list|new|close]
 ```
 
 `prompt` is implicit, so `acpx codex "fix tests"` and `acpx codex prompt "fix tests"` are equivalent.
@@ -38,10 +38,12 @@ acpx <agent> sessions [list|close]
 ### Examples
 
 ```bash
-acpx codex 'fix the tests'                    # implicit prompt, auto-resume session for cwd
+acpx codex sessions new                       # explicit session creation (once per project dir)
+acpx codex 'fix the tests'                    # implicit prompt, routes via directory-walk
 acpx codex prompt 'fix the tests'             # explicit prompt
 acpx codex exec 'what does this repo do'      # one-shot, no saved session
-acpx codex -s backend 'fix the API'           # named session
+acpx codex sessions new --name backend        # create named session
+acpx codex -s backend 'fix the API'           # prompt in named session
 acpx codex sessions                           # list sessions for codex
 acpx codex sessions close                     # close cwd-scoped codex session
 acpx codex sessions close backend             # close named codex session
@@ -52,6 +54,7 @@ acpx gemini 'add logging'                     # gemini adapter
 Default-agent shortcuts are also supported:
 
 ```bash
+acpx sessions new          # defaults to codex
 acpx prompt 'fix tests'   # defaults to codex
 acpx exec 'summarize repo'
 acpx sessions
@@ -78,9 +81,10 @@ Rules:
 
 ## Session Behavior
 
-- `prompt` always uses a saved session.
-- Session auto-resume lookup is scoped by `(agent command, cwd)`.
-- `-s <name>` switches to named-session scope `(agent command, cwd, name)`.
+- `prompt` always uses a saved session (no implicit creation).
+- Session routing walks up the directory tree (like `git`) from `cwd` (or `--cwd`) to `/` and picks the first active match by `(agent command, dir, optional name)`.
+- `sessions new [--name <name>]` is the explicit creation point for saved sessions.
+- `-s <name>` switches to named-session lookup during the directory walk.
 - `exec` is one-shot: temporary session, prompt, discard.
 - `sessions list` lists all saved sessions for the selected agent command.
 - `sessions close [name]` closes/removes cwd-scoped session or named cwd-scoped session.
@@ -99,6 +103,7 @@ These go before the agent name:
 --deny-all            Deny all permission requests
 --format <fmt>        Output format: text (default), json, quiet
 --timeout <seconds>   Maximum time to wait for agent response
+--ttl <seconds>       Queue owner idle TTL before shutdown (0 = keep alive forever)
 --verbose             Show ACP protocol debug info on stderr
 ```
 
@@ -147,7 +152,8 @@ Refactored the auth module to use async/await. All 42 tests passing.
 | 1    | Agent/protocol error                     |
 | 2    | CLI usage error                          |
 | 3    | Timeout                                  |
-| 4    | Permission denied (all options rejected) |
+| 4    | No session found                         |
+| 5    | Permission denied (all options rejected) |
 | 130  | Interrupted (Ctrl+C)                     |
 
 ## Tech Stack

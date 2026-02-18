@@ -98,6 +98,100 @@ test("findSession skips closed sessions by default and includes them when reques
   });
 });
 
+test("findSessionByDirectoryWalk returns the nearest active session by walking up directories", async () => {
+  await withTempHome(async (homeDir) => {
+    const session = await loadSessionModule();
+
+    const repoRoot = path.join(homeDir, "repo");
+    const packagesDir = path.join(repoRoot, "packages");
+    const nestedDir = path.join(packagesDir, "app");
+
+    await fs.mkdir(nestedDir, { recursive: true });
+
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-root",
+        sessionId: "session-root",
+        agentCommand: "agent-a",
+        cwd: repoRoot,
+      }),
+    );
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-packages",
+        sessionId: "session-packages",
+        agentCommand: "agent-a",
+        cwd: packagesDir,
+      }),
+    );
+
+    const found = await session.findSessionByDirectoryWalk({
+      agentCommand: "agent-a",
+      cwd: nestedDir,
+    });
+
+    assert.equal(found?.id, "session-packages");
+  });
+});
+
+test("findSessionByDirectoryWalk matches named sessions and skips closed sessions", async () => {
+  await withTempHome(async (homeDir) => {
+    const session = await loadSessionModule();
+
+    const repoRoot = path.join(homeDir, "repo");
+    const packagesDir = path.join(repoRoot, "packages");
+    const nestedDir = path.join(packagesDir, "app");
+
+    await fs.mkdir(nestedDir, { recursive: true });
+
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-closed",
+        sessionId: "session-closed",
+        agentCommand: "agent-a",
+        cwd: packagesDir,
+        closed: true,
+        closedAt: "2026-01-01T00:01:00.000Z",
+      }),
+    );
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-default",
+        sessionId: "session-default",
+        agentCommand: "agent-a",
+        cwd: repoRoot,
+      }),
+    );
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "session-named",
+        sessionId: "session-named",
+        agentCommand: "agent-a",
+        cwd: repoRoot,
+        name: "frontend",
+      }),
+    );
+
+    const foundDefault = await session.findSessionByDirectoryWalk({
+      agentCommand: "agent-a",
+      cwd: nestedDir,
+    });
+    const foundNamed = await session.findSessionByDirectoryWalk({
+      agentCommand: "agent-a",
+      cwd: nestedDir,
+      name: "frontend",
+    });
+
+    assert.equal(foundDefault?.id, "session-default");
+    assert.equal(foundNamed?.id, "session-named");
+  });
+});
+
 test("listSessionsForAgent returns every session for the agent command", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();
