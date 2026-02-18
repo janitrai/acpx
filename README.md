@@ -44,6 +44,16 @@ reading stale state from the previous run.
 [done] end_turn
 ```
 
+## Quick setup
+
+Copy and paste this into your AI agent (Codex, Claude Code, etc.) to install acpx and teach it how to use it:
+
+```
+npm i -g acpx && acpx --skill export acpx | npx skillflag install
+```
+
+This installs `acpx` globally and adds the acpx skill to your agent's context, so it knows how to run coding agents over ACP instead of scraping PTY sessions.
+
 ## Install
 
 ```bash
