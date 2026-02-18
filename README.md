@@ -44,6 +44,34 @@ reading stale state from the previous run.
 [done] end_turn
 ```
 
+## Quick setup — tell your agent about acpx
+
+Copy the block below and paste it into your OpenClaw, Pi, Claude Code, or similar agent harness. It will install acpx, read the skill reference, and know how to use ACP for all future coding agent tasks.
+
+```text
+I want you to use acpx to run coding agents over the Agent Client Protocol
+(ACP) instead of scraping PTY sessions. Please do the following:
+
+1. Install acpx globally:
+   npm i -g acpx
+
+2. Install the acpx skill so you have the full reference available:
+   acpx --skill export acpx | npx skillflag install
+
+3. Read the acpx skill reference so you know every command, flag, and
+   workflow pattern:
+   https://raw.githubusercontent.com/janitrai/acpx/main/skills/acpx/SKILL.md
+
+4. If you need the full CLI reference with all options and examples:
+   https://raw.githubusercontent.com/janitrai/acpx/main/docs/CLI.md
+
+From now on, when you need to delegate work to a coding agent, use acpx
+instead of spawning raw terminal sessions. For example:
+  acpx codex "fix the failing tests"
+  acpx claude "refactor the auth module"
+  acpx codex exec "one-shot: summarize this repo"
+```
+
 ## Install
 
 ```bash
