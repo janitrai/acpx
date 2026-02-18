@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { findSkillsRoot, maybeHandleSkillflag } from "skillflag/dist/index.js";
@@ -772,7 +773,10 @@ function isCliEntrypoint(argv: string[]): boolean {
   }
 
   try {
-    return import.meta.url === pathToFileURL(entry).href;
+    // Resolve symlinks so global npm installs match (argv[1] is the
+    // symlink in node_modules/.bin, import.meta.url is the real path).
+    const resolved = pathToFileURL(realpathSync(entry)).href;
+    return import.meta.url === resolved;
   } catch {
     return false;
   }
