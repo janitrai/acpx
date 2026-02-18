@@ -13,6 +13,8 @@
   },
   "scripts": {
     "build": "tsup src/cli.ts --format esm --dts --clean",
+    "prepare": "husky",
+    "precommit": "npm exec -- lint-staged && npm run -s build",
     "prepack": "npm run build",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
@@ -49,11 +51,22 @@
     "@types/node": "^22.0.0",
     "eslint": "^10.0.0",
     "globals": "^17.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
     "prettier": "^3.8.1",
     "release-it": "^19.2.4",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.0"
+  },
+  "lint-staged": {
+    "*.{js,ts}": [
+      "prettier --write --ignore-unknown",
+      "eslint --fix"
+    ],
+    "*.{json,md}": [
+      "prettier --write --ignore-unknown"
+    ]
   }
 }
