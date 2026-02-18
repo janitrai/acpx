@@ -2,7 +2,7 @@
 title: acpx Session Management
 description: How acpx resumes, names, stores, and closes sessions including pid tracking and subprocess lifecycle.
 author: Bob <bob@dutifulbob.com>
-date: 2026-02-17
+date: 2026-02-18
 ---
 
 ## Session model
@@ -17,15 +17,23 @@ Session lookup is scoped by:
 
 No `-s` means the default cwd session for that agent command.
 
+Session records can also be soft-closed:
+
+- `closed: true`
+- `closedAt: <timestamp>`
+
+Soft-closed records stay on disk and are visible in `sessions list`.
+
 ## Auto-resume behavior
 
 For prompt commands:
 
 1. `findSession` searches stored records by `(agentCommand, cwd, name?)`.
+   - auto-resume skips records marked `closed: true`.
 2. If no record exists, `createSession` creates ACP session + record.
 3. `sendSession` starts a fresh adapter process and tries `loadSession`.
 4. If load is unsupported or fails with known not-found/invalid errors, it falls back to `newSession`.
-5. After prompt completes, record metadata is updated and re-written.
+5. After prompt completes, record metadata is updated and re-written (`closed` cleared if needed).
 
 ## Named sessions
 
@@ -37,6 +45,8 @@ Example:
 - named session: `acpx codex -s backend 'fix API'`
 
 Both can coexist because names are part of the scope key.
+
+`sessions new --name backend` creates a fresh named session in that scope and soft-closes the prior open one.
 
 ## Session files
 
@@ -50,6 +60,7 @@ Record fields include:
 - `cwd`
 - `name` (optional)
 - `createdAt`, `lastUsedAt`
+- `closed`, `closedAt` (soft-close state)
 - `pid` (adapter process pid, optional)
 - `protocolVersion`, `agentCapabilities` (optional)
 
@@ -68,6 +79,22 @@ Resume path in `sendSession`:
 
 If resume fails with a fallback-eligible error, `newSession` is used and stored `sessionId` is replaced.
 
+Closed records can still be resumed explicitly via direct record id/session load flows when supported by the adapter.
+
+## Soft-close behavior
+
+Soft-close is used by:
+
+- `acpx <agent> sessions close [name]`
+- `acpx <agent> sessions new [--name <name>]` (for the replaced session)
+
+What soft-close does:
+
+1. terminate queue owner for the session if present
+2. terminate adapter process pid (`SIGTERM` then `SIGKILL`) when still alive and matching
+3. persist session JSON with `closed: true` and `closedAt`
+4. keep session file on disk (no deletion)
+
 ## PID tracking and process lifecycle
 
 `acpx` stores the adapter pid in each session record to help with cleanup and diagnostics.
@@ -76,9 +103,12 @@ Lifecycle behavior:
 
 - a queue owner `acpx` process is elected per active session turn and accepts queued prompts over local IPC
 - the owner drains queued prompts sequentially (one ACP prompt at a time)
+- after the queue drains, owner waits for new prompts up to an idle TTL (default 300s)
+- TTL is configurable via `--ttl <seconds>` (`0` disables TTL)
+- when TTL expires, owner shuts down, releases socket/lock, and exits
 - each prompt turn launches a fresh adapter subprocess owned by that queue owner process
 - records track pid of the latest process used
-- `closeSession` tries to terminate the stored pid if still alive and likely matches expected command
+- `closeSession` soft-closes and terminates related processes instead of deleting the record
 - process termination uses `SIGTERM` then `SIGKILL` fallback
 - signal handling (`SIGINT`, `SIGTERM`) closes client resources before exit
 

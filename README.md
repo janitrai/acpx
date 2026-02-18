@@ -9,6 +9,8 @@ One command surface for Codex, Claude, Gemini, OpenCode, Pi, or custom ACP serve
 - **Persistent sessions**: multi-turn conversations that survive across invocations, scoped per repo
 - **Named sessions**: run parallel workstreams in the same repo (`-s backend`, `-s frontend`)
 - **Prompt queueing**: submit prompts while one is already running, they execute in order
+- **Soft-close lifecycle**: close sessions without deleting history from disk
+- **Queue owner TTL**: keep queue owners alive briefly for follow-up prompts (`--ttl`)
 - **Fire-and-forget**: `--no-wait` queues a prompt and returns immediately
 - **Structured output**: typed ACP messages (thinking, tool calls, diffs) instead of ANSI scraping
 - **Any ACP agent**: built-in registry + `--agent` escape hatch for custom servers
@@ -76,6 +78,8 @@ acpx codex -s docs 'rewrite API docs'           # parallel work in another named
 
 acpx codex sessions              # list sessions for codex command
 acpx codex sessions list         # explicit list
+acpx codex sessions new          # create fresh cwd-scoped default session
+acpx codex sessions new --name api # create fresh named session
 acpx codex sessions close        # close cwd-scoped default session
 acpx codex sessions close api    # close cwd-scoped named session
 
@@ -111,6 +115,7 @@ acpx --format json codex exec 'review changed files'
 acpx --format quiet codex 'final recommendation only'
 
 acpx --timeout 90 codex 'investigate intermittent test timeout'
+acpx --ttl 30 codex 'keep queue owner alive for quick follow-ups'
 acpx --verbose codex 'debug why adapter startup is failing'
 ```
 
@@ -150,7 +155,11 @@ acpx --agent ./my-custom-acp-server 'do something'
 
 - Prompt commands use saved sessions scoped to `(agent command, cwd, optional name)`.
 - `-s <name>` creates/selects a parallel named session in the same repo.
+- `sessions new [--name <name>]` creates a fresh session for that scope and soft-closes the prior one.
+- `sessions close [name]` soft-closes the session: queue owner/processes are terminated, record is kept with `closed: true`.
+- Auto-resume for cwd scope skips sessions marked closed.
 - Prompt submissions are queue-aware per session. If a prompt is already running, new prompts are queued and drained by the running `acpx` process.
+- Queue owners use an idle TTL (default 300s). `--ttl <seconds>` overrides it; `--ttl 0` keeps owners alive indefinitely.
 - `--no-wait` submits to that queue and returns immediately.
 - `exec` is always one-shot and does not reuse saved sessions.
 - Session metadata is stored under `~/.acpx/sessions/`.

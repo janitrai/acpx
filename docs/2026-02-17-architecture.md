@@ -2,7 +2,7 @@
 title: acpx Architecture
 description: Internal architecture and runtime flow from CLI command to ACP session updates.
 author: Bob <bob@dutifulbob.com>
-date: 2026-02-17
+date: 2026-02-18
 ---
 
 ## Overview
@@ -19,7 +19,7 @@ The CLI never scrapes terminal text from an interactive UI. It talks structured 
 
 - `src/cli.ts`: command grammar, flags, output mode selection, and top-level command handling.
 - `src/client.ts`: ACP transport and protocol methods. Spawns the adapter process and connects with `ClientSideConnection` + `ndJsonStream`.
-- `src/session.ts`: session persistence, resume/create logic, timeout/interrupt handling, and lifecycle cleanup.
+- `src/session.ts`: session persistence, resume/create logic, queue ownership, soft-close lifecycle, timeout/interrupt handling, and cleanup.
 - `src/permissions.ts`: permission policy (`approve-all`, `approve-reads`, `deny-all`) and interactive fallback.
 - `src/output.ts`: streaming text/json/quiet output formatters.
 
@@ -50,11 +50,24 @@ Each record includes:
 - agent command
 - cwd
 - optional named session
-- timestamps (`createdAt`, `lastUsedAt`)
+- timestamps (`createdAt`, `lastUsedAt`, optional `closedAt`)
+- optional soft-close state (`closed`)
 - adapter process pid (when known)
 - protocol/version capabilities snapshot
 
 This lets `acpx` resume conversational context by default.
+
+Auto-resume lookup skips soft-closed records unless a record is selected explicitly.
+
+## Queue owner lifecycle
+
+Prompt submission is queue-aware per persistent session:
+
+- one `acpx` process becomes queue owner for the active turn
+- concurrent invocations submit prompt requests to the owner via local IPC
+- after queue drain, owner waits up to idle TTL (`--ttl`, default 300s) for new work
+- TTL expiry shuts down owner, releases socket/lock, and clears queue-owner record
+- `sessions close`/`sessions new` soft-close and terminate related processes without deleting session JSON
 
 ## Permission handling
 

@@ -21,7 +21,7 @@ const PROCESS_EXIT_GRACE_MS = 1_500;
 const PROCESS_POLL_MS = 50;
 const QUEUE_CONNECT_ATTEMPTS = 40;
 const QUEUE_CONNECT_RETRY_MS = 50;
-const QUEUE_IDLE_DRAIN_WAIT_MS = 150;
+export const DEFAULT_QUEUE_OWNER_TTL_MS = 300_000;
 
 export class TimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -65,6 +65,7 @@ export type SessionSendOptions = {
   outputFormatter: OutputFormatter;
   verbose?: boolean;
   waitForCompletion?: boolean;
+  ttlMs?: number;
 } & TimedRunOptions;
 
 function sessionFilePath(id: string): string {
@@ -154,6 +155,18 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
       : Number.isInteger(record.pid) && record.pid > 0
         ? record.pid
         : null;
+  const closed =
+    record.closed == null
+      ? false
+      : typeof record.closed === "boolean"
+        ? record.closed
+        : null;
+  const closedAt =
+    record.closedAt == null
+      ? undefined
+      : typeof record.closedAt === "string"
+        ? record.closedAt
+        : null;
 
   if (
     typeof record.id !== "string" ||
@@ -163,7 +176,9 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     name === null ||
     typeof record.createdAt !== "string" ||
     typeof record.lastUsedAt !== "string" ||
-    pid === null
+    pid === null ||
+    closed === null ||
+    closedAt === null
   ) {
     return null;
   }
@@ -177,6 +192,8 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     name,
     createdAt: record.createdAt,
     lastUsedAt: record.lastUsedAt,
+    closed,
+    closedAt,
     pid,
   };
 }
@@ -257,6 +274,18 @@ function normalizeName(value: string | undefined): string | undefined {
 
 function isoNow(): string {
   return new Date().toISOString();
+}
+
+function normalizeQueueOwnerTtlMs(ttlMs: number | undefined): number {
+  if (ttlMs == null) {
+    return DEFAULT_QUEUE_OWNER_TTL_MS;
+  }
+
+  if (!Number.isFinite(ttlMs) || ttlMs < 0) {
+    return DEFAULT_QUEUE_OWNER_TTL_MS;
+  }
+
+  return Math.round(ttlMs);
 }
 
 function formatError(error: unknown): string {
@@ -928,7 +957,7 @@ class SessionQueueOwner {
     });
   }
 
-  async nextTask(timeoutMs: number): Promise<QueueTask | undefined> {
+  async nextTask(timeoutMs?: number): Promise<QueueTask | undefined> {
     if (this.pending.length > 0) {
       return this.pending.shift();
     }
@@ -937,19 +966,24 @@ class SessionQueueOwner {
     }
 
     return await new Promise<QueueTask | undefined>((resolve) => {
-      const timer = setTimeout(
-        () => {
-          const index = this.waiters.indexOf(waiter);
-          if (index >= 0) {
-            this.waiters.splice(index, 1);
-          }
-          resolve(undefined);
-        },
-        Math.max(0, timeoutMs),
-      );
+      const shouldTimeout = timeoutMs != null;
+      const timer =
+        shouldTimeout &&
+        setTimeout(
+          () => {
+            const index = this.waiters.indexOf(waiter);
+            if (index >= 0) {
+              this.waiters.splice(index, 1);
+            }
+            resolve(undefined);
+          },
+          Math.max(0, timeoutMs),
+        );
 
       const waiter = (task: QueueTask | undefined) => {
-        clearTimeout(timer);
+        if (timer) {
+          clearTimeout(timer);
+        }
         resolve(task);
       };
 
@@ -1382,6 +1416,8 @@ async function runSessionPrompt(
         output.flush();
 
         record.lastUsedAt = isoNow();
+        record.closed = false;
+        record.closedAt = undefined;
         record.protocolVersion = client.initializeResult?.protocolVersion;
         record.agentCapabilities = client.initializeResult?.agentCapabilities;
         await writeSessionRecord(record);
@@ -1465,6 +1501,8 @@ export async function createSession(
           name: normalizeName(options.name),
           createdAt: now,
           lastUsedAt: now,
+          closed: false,
+          closedAt: undefined,
           pid: client.getAgentPid(),
           protocolVersion: client.initializeResult?.protocolVersion,
           agentCapabilities: client.initializeResult?.agentCapabilities,
@@ -1486,6 +1524,7 @@ export async function sendSession(
   options: SessionSendOptions,
 ): Promise<SessionSendOutcome> {
   const waitForCompletion = options.waitForCompletion !== false;
+  const queueOwnerTtlMs = normalizeQueueOwnerTtlMs(options.ttlMs);
 
   const queuedToOwner = await trySubmitToRunningOwner({
     sessionId: options.sessionId,
@@ -1532,9 +1571,17 @@ export async function sendSession(
         verbose: options.verbose,
       });
 
+      const idleWaitMs =
+        queueOwnerTtlMs === 0 ? undefined : Math.max(0, queueOwnerTtlMs);
+
       while (true) {
-        const task = await owner.nextTask(QUEUE_IDLE_DRAIN_WAIT_MS);
+        const task = await owner.nextTask(idleWaitMs);
         if (!task) {
+          if (queueOwnerTtlMs > 0 && options.verbose) {
+            process.stderr.write(
+              `[acpx] queue owner TTL expired after ${Math.round(queueOwnerTtlMs / 1_000)}s for session ${options.sessionId}; shutting down\n`,
+            );
+          }
           break;
         }
         await runQueuedTask(options.sessionId, task, options.verbose);
@@ -1581,6 +1628,7 @@ type FindSessionOptions = {
   agentCommand: string;
   cwd: string;
   name?: string;
+  includeClosed?: boolean;
 };
 
 export async function listSessionsForAgent(
@@ -1599,6 +1647,10 @@ export async function findSession(
 
   return sessions.find((session) => {
     if (session.cwd !== normalizedCwd) {
+      return false;
+    }
+
+    if (!options.includeClosed && session.closed) {
       return false;
     }
 
@@ -1634,7 +1686,11 @@ export async function closeSession(sessionId: string): Promise<SessionRecord> {
   ) {
     await terminateProcess(record.pid);
   }
-  const file = sessionFilePath(record.id);
-  await fs.unlink(file);
+
+  record.pid = undefined;
+  record.closed = true;
+  record.closedAt = isoNow();
+  await writeSessionRecord(record);
+
   return record;
 }

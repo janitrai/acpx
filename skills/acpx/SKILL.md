@@ -38,12 +38,12 @@ For normal session reuse, prefer a global install over `npx`.
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
 acpx [global_options] exec [prompt_text...]
-acpx [global_options] sessions [list | close [name]]
+acpx [global_options] sessions [list | new [--name <name>] | close [name]]
 
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
 acpx [global_options] <agent> exec [prompt_text...]
-acpx [global_options] <agent> sessions [list | close [name]]
+acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name]]
 ```
 
 If prompt text is omitted and stdin is piped, `acpx` reads prompt text from stdin.
@@ -111,16 +111,22 @@ Behavior:
 ```bash
 acpx sessions
 acpx sessions list
+acpx sessions new
+acpx sessions new --name backend
 acpx sessions close
 acpx sessions close backend
 
 acpx codex sessions
+acpx codex sessions new --name backend
 acpx codex sessions close backend
 ```
 
 Behavior:
 
 - `sessions` and `sessions list` are equivalent
+- `new` creates a fresh session for the current `(agentCommand, cwd, optional name)` scope
+- `new --name <name>` targets a named session scope
+- when `new` replaces an existing open session in that scope, the old one is soft-closed
 - `close` targets current cwd default session
 - `close <name>` targets current cwd named session
 
@@ -133,6 +139,7 @@ Behavior:
 - `--deny-all`: deny all permission requests
 - `--format <fmt>`: output format (`text`, `json`, `quiet`)
 - `--timeout <seconds>`: max wait time (positive number)
+- `--ttl <seconds>`: queue owner idle TTL before shutdown (default `300`, `0` disables TTL)
 - `--verbose`: verbose ACP/debug logs to stderr
 
 Permission flags are mutually exclusive.
@@ -150,11 +157,14 @@ Persistence:
 - Session records are stored in `~/.acpx/sessions/*.json`.
 - `-s/--session` creates parallel named conversations in the same repo.
 - Changing `--cwd` changes scope and therefore session lookup.
+- closed sessions are retained on disk with `closed: true` and `closedAt`.
+- auto-resume by scope skips closed sessions.
 
 Resume behavior:
 
 - Prompt mode attempts to reconnect to saved session.
 - If adapter-side session is invalid/not found, `acpx` creates a fresh session and updates the saved record.
+- explicitly selected session records can still be resumed via `loadSession` even if previously closed.
 
 ## Prompt queueing and `--no-wait`
 
@@ -165,6 +175,7 @@ Queueing is per persistent session.
 - On Unix-like systems, queue IPC uses a Unix socket under `~/.acpx/queues/<hash>.sock`.
 - Ownership is coordinated with a lock file under `~/.acpx/queues/<hash>.lock`.
 - On Windows, named pipes are used instead of Unix sockets.
+- after the queue drains, owner shutdown is governed by TTL (default 300s, configurable with `--ttl`).
 
 Submission behavior:
 

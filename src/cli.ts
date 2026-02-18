@@ -10,6 +10,7 @@ import {
 } from "./agent-registry.js";
 import { createOutputFormatter } from "./output.js";
 import {
+  DEFAULT_QUEUE_OWNER_TTL_MS,
   InterruptedError,
   TimeoutError,
   closeSession,
@@ -37,6 +38,7 @@ type GlobalFlags = PermissionFlags & {
   agent?: string;
   cwd: string;
   timeout?: number;
+  ttl: number;
   verbose?: boolean;
   format: OutputFormat;
 };
@@ -44,6 +46,10 @@ type GlobalFlags = PermissionFlags & {
 type PromptFlags = {
   session?: string;
   wait?: boolean;
+};
+
+type SessionsNewFlags = {
+  name?: string;
 };
 
 const TOP_LEVEL_VERBS = new Set(["prompt", "exec", "sessions", "help"]);
@@ -61,6 +67,14 @@ function parseTimeoutSeconds(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new InvalidArgumentError("Timeout must be a positive number of seconds");
+  }
+  return Math.round(parsed * 1000);
+}
+
+function parseTtlSeconds(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new InvalidArgumentError("TTL must be a non-negative number of seconds");
   }
   return Math.round(parsed * 1000);
 }
@@ -156,6 +170,12 @@ function addGlobalFlags(command: Command): Command {
       "Maximum time to wait for agent response",
       parseTimeoutSeconds,
     )
+    .option(
+      "--ttl <seconds>",
+      "Queue owner idle TTL before shutdown (0 disables TTL)",
+      parseTtlSeconds,
+      DEFAULT_QUEUE_OWNER_TTL_MS,
+    )
     .option("--verbose", "Enable verbose debug logs");
 }
 
@@ -178,6 +198,7 @@ function resolveGlobalFlags(command: Command): GlobalFlags {
     agent: opts.agent,
     cwd: opts.cwd ?? process.cwd(),
     timeout: opts.timeout,
+    ttl: opts.ttl ?? DEFAULT_QUEUE_OWNER_TTL_MS,
     verbose: opts.verbose,
     format: opts.format ?? "text",
     approveAll: opts.approveAll,
@@ -222,7 +243,8 @@ function printSessionsByFormat(sessions: SessionRecord[], format: OutputFormat):
 
   if (format === "quiet") {
     for (const session of sessions) {
-      process.stdout.write(`${session.id}\n`);
+      const closedMarker = session.closed ? " [closed]" : "";
+      process.stdout.write(`${session.id}${closedMarker}\n`);
     }
     return;
   }
@@ -233,8 +255,9 @@ function printSessionsByFormat(sessions: SessionRecord[], format: OutputFormat):
   }
 
   for (const session of sessions) {
+    const closedMarker = session.closed ? " [closed]" : "";
     process.stdout.write(
-      `${session.id}\t${session.name ?? "-"}\t${session.cwd}\t${session.lastUsedAt}\n`,
+      `${session.id}${closedMarker}\t${session.name ?? "-"}\t${session.cwd}\t${session.lastUsedAt}\n`,
     );
   }
 }
@@ -253,6 +276,37 @@ function printClosedSessionByFormat(record: SessionRecord, format: OutputFormat)
   }
 
   if (format === "quiet") {
+    return;
+  }
+
+  process.stdout.write(`${record.id}\n`);
+}
+
+function printNewSessionByFormat(
+  record: SessionRecord,
+  replaced: SessionRecord | undefined,
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        type: "session_created",
+        id: record.id,
+        sessionId: record.sessionId,
+        name: record.name,
+        replacedSessionId: replaced?.id,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    process.stdout.write(`${record.id}\n`);
+    return;
+  }
+
+  if (replaced) {
+    process.stdout.write(`${record.id}\t(replaced ${replaced.id})\n`);
     return;
   }
 
@@ -324,6 +378,7 @@ async function handlePrompt(
     permissionMode,
     outputFormatter,
     timeoutMs: globalFlags.timeout,
+    ttlMs: globalFlags.ttl,
     verbose: globalFlags.verbose,
     waitForCompletion: flags.wait !== false,
   });
@@ -404,13 +459,52 @@ async function handleSessionsClose(
   printClosedSessionByFormat(closed, globalFlags.format);
 }
 
+async function handleSessionsNew(
+  explicitAgentName: string | undefined,
+  flags: SessionsNewFlags,
+  command: Command,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command);
+  const permissionMode = resolvePermissionMode(globalFlags);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+
+  const replaced = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.name,
+  });
+
+  if (replaced) {
+    await closeSession(replaced.id);
+    if (globalFlags.verbose) {
+      process.stderr.write(`[acpx] soft-closed prior session: ${replaced.id}\n`);
+    }
+  }
+
+  const created = await createSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.name,
+    permissionMode,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  if (globalFlags.verbose) {
+    const scope = flags.name ? `named session "${flags.name}"` : "cwd session";
+    process.stderr.write(`[acpx] created ${scope}: ${created.id}\n`);
+  }
+
+  printNewSessionByFormat(created, replaced, globalFlags.format);
+}
+
 function registerSessionsCommand(
   parent: Command,
   explicitAgentName: string | undefined,
 ): void {
   const sessionsCommand = parent
     .command("sessions")
-    .description("List or close sessions for this agent");
+    .description("List, create, or close sessions for this agent");
 
   sessionsCommand.action(async function (this: Command) {
     await handleSessionsList(explicitAgentName, this);
@@ -421,6 +515,14 @@ function registerSessionsCommand(
     .description("List sessions")
     .action(async function (this: Command) {
       await handleSessionsList(explicitAgentName, this);
+    });
+
+  sessionsCommand
+    .command("new")
+    .description("Create a fresh session for current cwd")
+    .option("--name <name>", "Session name", parseSessionName)
+    .action(async function (this: Command, flags: SessionsNewFlags) {
+      await handleSessionsNew(explicitAgentName, flags, this);
     });
 
   sessionsCommand
@@ -534,7 +636,12 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
       continue;
     }
 
-    if (token === "--cwd" || token === "--format" || token === "--timeout") {
+    if (
+      token === "--cwd" ||
+      token === "--format" ||
+      token === "--timeout" ||
+      token === "--ttl"
+    ) {
       index += 1;
       continue;
     }
@@ -542,7 +649,8 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
     if (
       token.startsWith("--cwd=") ||
       token.startsWith("--format=") ||
-      token.startsWith("--timeout=")
+      token.startsWith("--timeout=") ||
+      token.startsWith("--ttl=")
     ) {
       continue;
     }
@@ -616,7 +724,9 @@ Examples:
   acpx codex exec "what does this repo do"
   acpx codex -s backend "fix the API"
   acpx codex sessions
+  acpx codex sessions new --name backend
   acpx codex sessions close backend
+  acpx --ttl 30 codex "investigate flaky tests"
   acpx claude "refactor auth"
   acpx gemini "add logging"
   acpx --agent ./my-custom-server "do something"`,

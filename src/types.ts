@@ -88,6 +88,8 @@ export type SessionRecord = {
   name?: string;
   createdAt: string;
   lastUsedAt: string;
+  closed?: boolean;
+  closedAt?: string;
   pid?: number;
   protocolVersion?: number;
   agentCapabilities?: AgentCapabilities;

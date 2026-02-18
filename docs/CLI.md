@@ -2,7 +2,7 @@
 title: acpx CLI Reference
 description: Definitive command and behavior reference for the acpx CLI, including grammar, options, session rules, output modes, permissions, and exit codes.
 author: Bob <bob@dutifulbob.com>
-date: 2026-02-17
+date: 2026-02-18
 ---
 
 ## Overview
@@ -23,12 +23,12 @@ Global options apply to all commands.
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
 acpx [global_options] exec [prompt_text...]
-acpx [global_options] sessions [list | close [name]]
+acpx [global_options] sessions [list | new [--name <name>] | close [name]]
 
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
 acpx [global_options] <agent> exec [prompt_text...]
-acpx [global_options] <agent> sessions [list | close [name]]
+acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name]]
 ```
 
 `<agent>` can be:
@@ -63,6 +63,7 @@ All global options:
 | `--deny-all`          | Deny all permissions                           | Permission mode `deny-all`.                                         |
 | `--format <fmt>`      | Output format                                  | `text` (default), `json`, `quiet`.                                  |
 | `--timeout <seconds>` | Max wait time for agent response               | Must be positive. Decimal seconds allowed.                          |
+| `--ttl <seconds>`     | Queue owner idle TTL before shutdown           | Default `300`. `0` disables TTL.                                    |
 | `--verbose`           | Enable verbose logs                            | Prints ACP/debug details to stderr.                                 |
 
 Permission flags are mutually exclusive. Using more than one of `--approve-all`, `--approve-reads`, `--deny-all` is a usage error.
@@ -77,6 +78,7 @@ acpx --deny-all codex 'summarize this code without running tools'
 acpx --cwd ~/repos/api codex 'review auth middleware'
 acpx --format json codex exec 'summarize open TODO items'
 acpx --timeout 120 codex 'investigate flaky test failures'
+acpx --ttl 30 codex 'keep queue owner warm for quick follow-up'
 acpx --verbose codex 'debug adapter startup issues'
 ```
 
@@ -90,7 +92,7 @@ Each agent command supports the same shape.
 acpx [global_options] codex [prompt_options] [prompt_text...]
 acpx [global_options] codex prompt [prompt_options] [prompt_text...]
 acpx [global_options] codex exec [prompt_text...]
-acpx [global_options] codex sessions [list | close [name]]
+acpx [global_options] codex sessions [list | new [--name <name>] | close [name]]
 ```
 
 Built-in command mapping: `codex -> npx @zed-industries/codex-acp`
@@ -101,7 +103,7 @@ Built-in command mapping: `codex -> npx @zed-industries/codex-acp`
 acpx [global_options] claude [prompt_options] [prompt_text...]
 acpx [global_options] claude prompt [prompt_options] [prompt_text...]
 acpx [global_options] claude exec [prompt_text...]
-acpx [global_options] claude sessions [list | close [name]]
+acpx [global_options] claude sessions [list | new [--name <name>] | close [name]]
 ```
 
 Built-in command mapping: `claude -> npx @zed-industries/claude-agent-acp`
@@ -112,7 +114,7 @@ Built-in command mapping: `claude -> npx @zed-industries/claude-agent-acp`
 acpx [global_options] gemini [prompt_options] [prompt_text...]
 acpx [global_options] gemini prompt [prompt_options] [prompt_text...]
 acpx [global_options] gemini exec [prompt_text...]
-acpx [global_options] gemini sessions [list | close [name]]
+acpx [global_options] gemini sessions [list | new [--name <name>] | close [name]]
 ```
 
 Built-in command mapping: `gemini -> gemini`
@@ -172,6 +174,8 @@ Behavior:
 ```bash
 acpx [global_options] <agent> sessions
 acpx [global_options] <agent> sessions list
+acpx [global_options] <agent> sessions new
+acpx [global_options] <agent> sessions new --name <name>
 acpx [global_options] <agent> sessions close
 acpx [global_options] <agent> sessions close <name>
 
@@ -182,8 +186,11 @@ Behavior:
 
 - `sessions` and `sessions list` are equivalent
 - list returns all saved sessions for selected `agentCommand` (across all cwd values)
-- `sessions close` closes the current cwd default session
-- `sessions close <name>` closes current cwd named session
+- `sessions new` creates a fresh cwd-scoped default session
+- `sessions new --name <name>` creates a fresh named session for cwd
+- creating a fresh session soft-closes the previous open session in that scope (if present)
+- `sessions close` soft-closes the current cwd default session
+- `sessions close <name>` soft-closes current cwd named session
 - close errors if the target session does not exist
 
 ## `--agent` escape hatch
@@ -216,6 +223,7 @@ Session records are stored in:
 For prompt commands:
 
 1. Find session by `(agentCommand, absoluteCwd, optionalName)`
+   - closed sessions are skipped for automatic scope-based lookup
 2. If missing, create and persist a new session record
 3. On send, attempt `loadSession` when the adapter supports it
 4. If load fails with not-found/invalid-session style errors, create a fresh session and update record
@@ -228,7 +236,14 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 1. owner process keeps the active turn running
 2. other `acpx` invocations enqueue prompts through local IPC
 3. owner drains queued prompts one-by-one after each completed turn
-4. submitter either blocks until completion (default) or exits immediately with `--no-wait`
+4. after the queue drains, owner waits for new work up to TTL (`--ttl`, default 300s)
+5. submitter either blocks until completion (default) or exits immediately with `--no-wait`
+
+### Soft-close behavior
+
+- soft-closed sessions remain on disk with `closed: true` and `closedAt`
+- auto-resume ignores closed sessions during scope lookup
+- closed sessions still keep full record data and can be resumed explicitly via record id/session load flows
 
 ### Named sessions
 
@@ -254,9 +269,12 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 
 ### Sessions command output behavior
 
-- `sessions list` with `text`: tab-separated `id`, `name`, `cwd`, `lastUsedAt` (or `No sessions`)
+- `sessions list` with `text`: tab-separated `id`, `name`, `cwd`, `lastUsedAt` (closed sessions include a `[closed]` marker next to id)
 - `sessions list` with `json`: a single JSON array of session records
-- `sessions list` with `quiet`: one session id per line
+- `sessions list` with `quiet`: one session id per line (closed sessions include `[closed]`)
+- `sessions new` with `text`: new session id (and replaced id when applicable)
+- `sessions new` with `json`: `{"type":"session_created",...}`
+- `sessions new` with `quiet`: new session id
 - `sessions close` with `text`: closed record id
 - `sessions close` with `json`: `{"type":"session_closed",...}`
 - `sessions close` with `quiet`: no output
@@ -314,6 +332,7 @@ acpx claude exec 'summarize src/session.ts in 5 bullets'
 
 # Manage sessions
 acpx codex sessions
+acpx codex sessions new --name docs
 acpx codex sessions close docs
 
 # JSON automation pipeline
