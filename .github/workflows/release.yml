@@ -37,4 +37,3 @@ jobs:
       - run: npm run release:ci -- --increment ${{ inputs.increment }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
