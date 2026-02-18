@@ -141,7 +141,7 @@ acpx [global_options] prompt [prompt_options] [prompt_text...]
 Behavior:
 
 - Finds existing session for scope key `(agentCommand, cwd, name?)`
-- Creates a new session record if missing
+- Does not auto-create sessions; missing scope exits with code `4` and guidance to run `sessions new`
 - Sends prompt on resumed/new session
 - If another prompt is already running for that session, submits to the running queue owner instead of starting a second ACP subprocess
 - By default waits for queued prompt completion; `--no-wait` returns after queue acknowledgement
@@ -222,10 +222,12 @@ Session records are stored in:
 
 For prompt commands:
 
-1. Walk up the directory tree from `absoluteCwd` to `/` (like `git`).
-2. At each directory, find the first active (non-closed) session matching `(agentCommand, dir, optionalName)`.
-3. If found, use that session record for prompt queueing and resume attempts.
-4. If not found, exit with code `4` and print guidance to create one via `sessions new`.
+1. Detect the nearest git root by checking for `.git` while walking up from `absoluteCwd`.
+2. If a git root is found, walk from `absoluteCwd` up to that git root (inclusive).
+3. If no git root exists, only check exact `absoluteCwd` (no parent-directory walk).
+4. At each checked directory, find the first active (non-closed) session matching `(agentCommand, dir, optionalName)`.
+5. If found, use that session record for prompt queueing and resume attempts.
+6. If not found, exit with code `4` and print guidance to create one via `sessions new`.
 
 `sessions new [--name <name>]` is the explicit creation point for saved session records.
 
@@ -251,7 +253,7 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 
 ### CWD scoping
 
-`--cwd` sets the starting point for directory-walk routing (and the exact scope directory when creating sessions via `sessions new`).
+`--cwd` sets the starting point for directory-walk routing (bounded by git root) and the exact scope directory when creating sessions via `sessions new`.
 
 ## Output formats
 

@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { InvalidArgumentError } from "commander";
-import { parseTtlSeconds } from "../src/cli.js";
+import { formatPromptSessionBannerLine, parseTtlSeconds } from "../src/cli.js";
 import type { SessionRecord } from "../src/types.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -29,6 +29,41 @@ test("parseTtlSeconds rejects non-numeric values", () => {
 
 test("parseTtlSeconds rejects negative values", () => {
   assert.throws(() => parseTtlSeconds("-1"), InvalidArgumentError);
+});
+
+test("formatPromptSessionBannerLine prints single-line prompt banner for matching cwd", () => {
+  const record: SessionRecord = {
+    id: "abc123",
+    sessionId: "abc123",
+    agentCommand: "agent-a",
+    cwd: "/home/user/project",
+    name: "calm-forest",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastUsedAt: "2026-01-01T00:00:00.000Z",
+    closed: false,
+  };
+
+  const line = formatPromptSessionBannerLine(record, "/home/user/project");
+  assert.equal(line, "[acpx] session calm-forest (abc123) · /home/user/project");
+});
+
+test("formatPromptSessionBannerLine includes routed-from path when cwd differs", () => {
+  const record: SessionRecord = {
+    id: "abc123",
+    sessionId: "abc123",
+    agentCommand: "agent-a",
+    cwd: "/home/user/project",
+    name: "calm-forest",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastUsedAt: "2026-01-01T00:00:00.000Z",
+    closed: false,
+  };
+
+  const line = formatPromptSessionBannerLine(record, "/home/user/project/src/auth");
+  assert.equal(
+    line,
+    "[acpx] session calm-forest (abc123) · /home/user/project (routed from ./src/auth)",
+  );
 });
 
 test("CLI resolves unknown subcommand names as raw agent commands", async () => {
@@ -93,9 +128,12 @@ test("prompt exits with NO_SESSION when no session exists (no auto-create)", asy
     const result = await runCli(["--cwd", cwd, "codex", "hello"], homeDir);
 
     assert.equal(result.code, 4);
+    const escapedCwd = escapeRegex(cwd);
     assert.match(
       result.stderr,
-      /⚠ No acpx session found \(searched up to \/\)\.\nCreate one: acpx codex sessions new\n?/,
+      new RegExp(
+        `⚠ No acpx session found \\(searched up to ${escapedCwd}\\)\\.\\nCreate one: acpx codex sessions new\\n?`,
+      ),
     );
   });
 });
@@ -146,4 +184,8 @@ async function writeSessionRecord(
   await fs.mkdir(sessionDir, { recursive: true });
   const file = path.join(sessionDir, `${encodeURIComponent(record.id)}.json`);
   await fs.writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

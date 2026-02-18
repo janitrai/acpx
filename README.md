@@ -186,7 +186,8 @@ acpx --agent ./my-custom-acp-server 'do something'
 ## Session behavior
 
 - Prompt commands require an existing saved session record (created via `sessions new`).
-- Prompts route by walking up the directory tree (like `git`) from `cwd` (or `--cwd`) and selecting the nearest active session matching `(agent command, dir, optional name)`.
+- Prompts route by walking up from `cwd` (or `--cwd`) to the nearest git root (inclusive) and selecting the nearest active session matching `(agent command, dir, optional name)`.
+- If no git root is found, prompts only match an exact `cwd` session (no parent-directory walk).
 - `-s <name>` selects a parallel named session during that directory walk.
 - `sessions new [--name <name>]` creates a fresh session for that scope and soft-closes the prior one.
 - `sessions close [name]` soft-closes the session: queue owner/processes are terminated, record is kept with `closed: true`.

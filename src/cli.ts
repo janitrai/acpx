@@ -17,6 +17,7 @@ import {
   TimeoutError,
   closeSession,
   createSession,
+  findGitRepositoryRoot,
   findSession,
   findSessionByDirectoryWalk,
   listSessionsForAgent,
@@ -351,14 +352,43 @@ function formatSessionLabel(record: SessionRecord): string {
   return record.name ?? "cwd";
 }
 
-function printPromptSessionBanner(record: SessionRecord, format: OutputFormat): void {
+function formatRoutedFrom(sessionCwd: string, currentCwd: string): string | undefined {
+  const relative = path.relative(sessionCwd, currentCwd);
+  if (!relative || relative === ".") {
+    return undefined;
+  }
+  return relative.startsWith(".") ? relative : `.${path.sep}${relative}`;
+}
+
+export function formatPromptSessionBannerLine(
+  record: SessionRecord,
+  currentCwd: string,
+): string {
+  const label = formatSessionLabel(record);
+  const normalizedSessionCwd = path.resolve(record.cwd);
+  const normalizedCurrentCwd = path.resolve(currentCwd);
+  const routedFrom =
+    normalizedSessionCwd === normalizedCurrentCwd
+      ? undefined
+      : formatRoutedFrom(normalizedSessionCwd, normalizedCurrentCwd);
+
+  if (routedFrom) {
+    return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd} (routed from ${routedFrom})`;
+  }
+
+  return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd}`;
+}
+
+function printPromptSessionBanner(
+  record: SessionRecord,
+  currentCwd: string,
+  format: OutputFormat,
+): void {
   if (format === "quiet") {
     return;
   }
 
-  const label = formatSessionLabel(record);
-  process.stderr.write(`[acpx] session ${label} (${record.id})\n`);
-  process.stderr.write(`[acpx] cwd: ${record.cwd}\n`);
+  process.stderr.write(`${formatPromptSessionBannerLine(record, currentCwd)}\n`);
 }
 
 function printCreatedSessionBanner(
@@ -387,24 +417,26 @@ async function handlePrompt(
   const prompt = await readPrompt(promptParts);
   const outputFormatter = createOutputFormatter(globalFlags.format);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const gitRoot = findGitRepositoryRoot(agent.cwd);
+  const walkBoundary = gitRoot ?? agent.cwd;
 
   const record = await findSessionByDirectoryWalk({
     agentCommand: agent.agentCommand,
     cwd: agent.cwd,
     name: flags.session,
+    boundary: walkBoundary,
   });
 
   if (!record) {
-    const root = path.parse(agent.cwd).root || "/";
     const createCmd = flags.session
       ? `acpx ${agent.agentName} sessions new --name ${flags.session}`
       : `acpx ${agent.agentName} sessions new`;
     throw new NoSessionError(
-      `⚠ No acpx session found (searched up to ${root}).\nCreate one: ${createCmd}`,
+      `⚠ No acpx session found (searched up to ${walkBoundary}).\nCreate one: ${createCmd}`,
     );
   }
 
-  printPromptSessionBanner(record, globalFlags.format);
+  printPromptSessionBanner(record, agent.cwd, globalFlags.format);
 
   const result = await sendSession({
     sessionId: record.id,
