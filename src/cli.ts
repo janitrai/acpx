@@ -4,7 +4,7 @@ import { Command, CommanderError, InvalidArgumentError } from "commander";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { findSkillsRoot, maybeHandleSkillflag } from "skillflag/dist/index.js";
+import { findSkillsRoot, maybeHandleSkillflag } from "skillflag";
 import {
   DEFAULT_AGENT_NAME,
   listBuiltInAgents,
