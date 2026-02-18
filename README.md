@@ -53,8 +53,11 @@ Copy the block below and paste it into your OpenClaw, Pi, Claude Code, or simila
 I want you to use acpx to run coding agents over the Agent Client Protocol
 (ACP) instead of scraping PTY sessions. Please do the following:
 
-1. Install acpx globally:
+1. Install acpx (global is recommended for frequent use, but npx works fine too):
    npm i -g acpx
+
+   Or, run without installing:
+   npx acpx@latest
 
 2. Install the acpx skill so you have the full reference available:
    acpx --skill export acpx | npx skillflag install
@@ -79,7 +82,7 @@ instead of spawning raw terminal sessions. For example:
 npm i -g acpx
 ```
 
-`acpx` manages persistent sessions, so prefer a global install. Avoid `npx acpx ...` for normal use.
+`acpx` manages persistent sessions in `~/.acpx/`, so global install is a little faster and easier to debug, but `npx acpx@latest ...` works fine if you don't want a global install.
 
 ## Agent prerequisites
 
