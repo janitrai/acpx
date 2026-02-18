@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsup src/cli.ts --format esm --dts --clean",
     "build:test": "tsc -p tsconfig.test.json",
-    "test": "npm run build:test && node --experimental-test-module-mocks --test 'dist-test/test/*.test.js'",
+    "test": "npm run build:test && find dist-test/test -name '*.test.js' -exec node --experimental-test-module-mocks --test {} +",
     "prepare": "husky",
     "precommit": "npm exec -- lint-staged && npm run -s build",
     "prepack": "npm run build",
