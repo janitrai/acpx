@@ -86,7 +86,7 @@ test("CLI resolves unknown subcommand names as raw agent commands", async () => 
     await writeSessionRecord(homeDir, session);
 
     const result = await runCli(
-      ["--cwd", cwd, "custom-agent", "sessions", "--format", "quiet"],
+      ["--cwd", cwd, "--format", "quiet", "custom-agent", "sessions"],
       homeDir,
     );
 
@@ -109,7 +109,7 @@ test("sessions new command is present in help output", async () => {
 
 test("--ttl flag is parsed for sessions commands", async () => {
   await withTempHome(async (homeDir) => {
-    const ok = await runCli(["--ttl", "30", "sessions", "--format", "json"], homeDir);
+    const ok = await runCli(["--ttl", "30", "--format", "json", "sessions"], homeDir);
     assert.equal(ok.code, 0, ok.stderr);
     assert.doesNotThrow(() => JSON.parse(ok.stdout.trim()));
 
@@ -187,6 +187,38 @@ test("prompt supports --file - with additional argument text", async () => {
     assert.equal(result.code, 4);
     assert.match(result.stderr, /No acpx session found/);
     assert.doesNotMatch(result.stderr, /Prompt is required/);
+  });
+});
+
+test("prompt subcommand accepts --file without being consumed by parent command", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.writeFile(path.join(cwd, "prompt.md"), "fix the tests\n", "utf8");
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "prompt", "--file", "prompt.md"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+    assert.doesNotMatch(result.stderr, /unknown option/i);
+  });
+});
+
+test("exec subcommand accepts --file without being consumed by parent command", async () => {
+  await withTempHome(async (homeDir) => {
+    const promptPath = path.join(homeDir, "prompt.txt");
+    await fs.writeFile(promptPath, "say exactly: file-flag-test\n", "utf8");
+
+    const result = await runCli(
+      ["custom-agent", "exec", "--file", promptPath],
+      homeDir,
+    );
+
+    assert.equal(result.code, 1);
+    assert.doesNotMatch(result.stderr, /unknown option/i);
   });
 });
 
