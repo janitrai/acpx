@@ -646,11 +646,10 @@ export class AcpClient {
 
     const selected = this.selectAuthMethod(methods);
     if (!selected) {
-      throw new Error(
-        `Agent requires authentication, but no credentials were found for methods: ${methods
-          .map((method) => method.id)
-          .join(", ")}`,
+      this.log(
+        `agent advertised auth methods [${methods.map((m) => m.id).join(", ")}] but no matching credentials found — skipping (agent may handle auth internally)`,
       );
+      return;
     }
 
     await connection.authenticate({
