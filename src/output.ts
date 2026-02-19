@@ -8,7 +8,12 @@ import type {
   ToolCallStatus,
   ToolCallUpdate,
 } from "@agentclientprotocol/sdk";
-import type { OutputEvent, OutputFormat, OutputFormatter } from "./types.js";
+import type {
+  ClientOperation,
+  OutputEvent,
+  OutputFormat,
+  OutputFormatter,
+} from "./types.js";
 
 type WritableLike = {
   write(chunk: string): void;
@@ -21,7 +26,7 @@ type OutputFormatterOptions = {
 
 type NormalizedToolStatus = ToolCallStatus | "unknown";
 
-type FormatterSection = "assistant" | "thought" | "tool" | "plan" | "done";
+type FormatterSection = "assistant" | "thought" | "tool" | "plan" | "client" | "done";
 
 type ToolRenderState = {
   id: string;
@@ -516,6 +521,24 @@ class TextOutputFormatter implements OutputFormatter {
     this.writeLine(this.dim(`[done] ${stopReason}`));
   }
 
+  onClientOperation(operation: ClientOperation): void {
+    this.flushThoughtBuffer();
+    this.beginSection("client");
+
+    const normalizedStatus: NormalizedToolStatus =
+      operation.status === "completed"
+        ? "completed"
+        : operation.status === "failed"
+          ? "failed"
+          : "in_progress";
+    const statusText = this.colorStatus(operation.status, normalizedStatus);
+    this.writeLine(`${this.bold("[client]")} ${operation.summary} (${statusText})`);
+    if (operation.details && operation.details.trim().length > 0) {
+      this.writeLine("  details:");
+      this.writeLine(indentBlock(operation.details, "    "));
+    }
+  }
+
   flush(): void {
     this.flushThoughtBuffer();
     if (!this.atLineStart) {
@@ -811,6 +834,17 @@ class JsonOutputFormatter implements OutputFormatter {
     });
   }
 
+  onClientOperation(operation: ClientOperation): void {
+    this.emit({
+      type: "client_operation",
+      method: operation.method,
+      status: operation.status,
+      summary: operation.summary,
+      details: operation.details,
+      timestamp: operation.timestamp,
+    });
+  }
+
   flush(): void {
     // no-op for streaming output
   }
@@ -842,6 +876,10 @@ class QuietOutputFormatter implements OutputFormatter {
   onDone(_stopReason: StopReason): void {
     const text = this.chunks.join("");
     this.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+  }
+
+  onClientOperation(_operation: ClientOperation): void {
+    // no-op in quiet mode
   }
 
   flush(): void {

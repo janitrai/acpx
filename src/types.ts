@@ -1,6 +1,7 @@
 import type {
   AgentCapabilities,
   SessionNotification,
+  SetSessionConfigOptionResponse,
   StopReason,
 } from "@agentclientprotocol/sdk";
 
@@ -29,6 +30,25 @@ export type PermissionStats = {
   cancelled: number;
 };
 
+export type ClientOperationMethod =
+  | "fs/read_text_file"
+  | "fs/write_text_file"
+  | "terminal/create"
+  | "terminal/output"
+  | "terminal/wait_for_exit"
+  | "terminal/kill"
+  | "terminal/release";
+
+export type ClientOperationStatus = "running" | "completed" | "failed";
+
+export type ClientOperation = {
+  method: ClientOperationMethod;
+  status: ClientOperationStatus;
+  summary: string;
+  details?: string;
+  timestamp: string;
+};
+
 export type OutputEvent =
   | {
       type: "text";
@@ -45,6 +65,14 @@ export type OutputEvent =
       toolCallId?: string;
       title?: string;
       status?: string;
+      timestamp: string;
+    }
+  | {
+      type: "client_operation";
+      method: ClientOperationMethod;
+      status: ClientOperationStatus;
+      summary: string;
+      details?: string;
       timestamp: string;
     }
   | {
@@ -69,6 +97,7 @@ export type OutputEvent =
 
 export interface OutputFormatter {
   onSessionUpdate(notification: SessionNotification): void;
+  onClientOperation(operation: ClientOperation): void;
   onDone(stopReason: StopReason): void;
   flush(): void;
 }
@@ -77,8 +106,10 @@ export type AcpClientOptions = {
   agentCommand: string;
   cwd: string;
   permissionMode: PermissionMode;
+  authCredentials?: Record<string, string>;
   verbose?: boolean;
   onSessionUpdate?: (notification: SessionNotification) => void;
+  onClientOperation?: (operation: ClientOperation) => void;
 };
 
 export type SessionHistoryRole = "user" | "assistant";
@@ -119,6 +150,19 @@ export type RunPromptResult = {
 
 export type SessionSendResult = RunPromptResult & {
   record: SessionRecord;
+  resumed: boolean;
+  loadError?: string;
+};
+
+export type SessionSetModeResult = {
+  record: SessionRecord;
+  resumed: boolean;
+  loadError?: string;
+};
+
+export type SessionSetConfigOptionResult = {
+  record: SessionRecord;
+  response: SetSessionConfigOptionResponse;
   resumed: boolean;
   loadError?: string;
 };

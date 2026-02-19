@@ -19,12 +19,16 @@ Core capabilities:
 - One-shot execution mode (`exec`)
 - Named parallel sessions (`-s/--session`)
 - Queue-aware prompt submission with optional fire-and-forget (`--no-wait`)
+- Cooperative cancel command (`cancel`) for in-flight turns
 - Graceful cancellation via ACP `session/cancel` on interrupt
+- Session control methods (`set-mode`, `set <key> <value>`)
 - Agent reconnect/resume after dead subprocess detection
 - Prompt input via stdin or `--file`
 - Config files with global+project merge and `config show|init`
 - Session metadata/history inspection (`sessions show`, `sessions history`)
 - Local agent process checks via `status`
+- Stable ACP client methods for filesystem and terminal requests
+- Stable ACP `authenticate` handshake via env/config credentials
 - Structured streaming output (`text`, `json`, `quiet`)
 - Built-in agent registry plus raw `--agent` escape hatch
 
@@ -44,6 +48,9 @@ For normal session reuse, prefer a global install over `npx`.
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
 acpx [global_options] exec [prompt_options] [prompt_text...]
+acpx [global_options] cancel [-s <name>]
+acpx [global_options] set-mode <mode> [-s <name>]
+acpx [global_options] set <key> <value> [-s <name>]
 acpx [global_options] status [-s <name>]
 acpx [global_options] sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 acpx [global_options] config [show | init]
@@ -51,6 +58,9 @@ acpx [global_options] config [show | init]
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
 acpx [global_options] <agent> exec [prompt_options] [prompt_text...]
+acpx [global_options] <agent> cancel [-s <name>]
+acpx [global_options] <agent> set-mode <mode> [-s <name>]
+acpx [global_options] <agent> set <key> <value> [-s <name>]
 acpx [global_options] <agent> status [-s <name>]
 acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 ```
@@ -117,6 +127,21 @@ Behavior:
 - Runs a single prompt in a temporary ACP session
 - Does not reuse or save persistent session state
 
+### Cancel / Mode / Config
+
+```bash
+acpx codex cancel
+acpx codex set-mode plan
+acpx codex set approval_policy conservative
+```
+
+Behavior:
+
+- `cancel`: sends cooperative `session/cancel` through queue-owner IPC.
+- `set-mode`: calls ACP `session/set_mode`.
+- `set`: calls ACP `session/set_config_option`.
+- `set-mode`/`set` route through queue-owner IPC when active, otherwise reconnect directly.
+
 ### Sessions
 
 ```bash
@@ -178,6 +203,7 @@ Supported keys:
 - `timeout` (seconds or `null`)
 - `format` (`text`, `json`, `quiet`)
 - `agents` map (`name -> { command }`)
+- `auth` map (`authMethodId -> credential`)
 
 Use `acpx config show` to inspect the resolved config and `acpx config init` to create the global template.
 
@@ -221,6 +247,7 @@ Submission behavior:
 - Default: enqueue and wait for queued prompt completion, streaming updates back.
 - `--no-wait`: enqueue and return after queue acknowledgement.
 - `Ctrl+C` during an active turn sends ACP `session/cancel`, waits briefly, then force-kills only if cancellation does not finish in time.
+- `cancel` sends the same cooperative cancellation without requiring terminal signals.
 
 ## Output formats
 

@@ -2,6 +2,7 @@ import {
   ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
+  type AuthMethod,
   type CreateTerminalRequest,
   type CreateTerminalResponse,
   type InitializeResponse,
@@ -15,6 +16,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
+  type SetSessionConfigOptionResponse,
   type TerminalOutputRequest,
   type TerminalOutputResponse,
   type WaitForTerminalExitRequest,
@@ -23,11 +25,11 @@ import {
   type WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
+import { FileSystemHandlers } from "./filesystem.js";
 import { classifyPermissionDecision, resolvePermissionRequest } from "./permissions.js";
+import { TerminalManager } from "./terminal.js";
 import type { AcpClientOptions, PermissionStats } from "./types.js";
 
 type CommandParts = {
@@ -35,17 +37,6 @@ type CommandParts = {
   args: string[];
 };
 
-type InternalTerminal = {
-  process: ChildProcessByStdio<null, Readable, Readable>;
-  output: Buffer;
-  truncated: boolean;
-  outputByteLimit: number;
-  exitCode: number | null | undefined;
-  signal: NodeJS.Signals | null | undefined;
-  waiters: Array<(response: WaitForTerminalExitResponse) => void>;
-};
-
-const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const REPLAY_IDLE_MS = 80;
 const REPLAY_DRAIN_TIMEOUT_MS = 5_000;
 const DRAIN_POLL_INTERVAL_MS = 20;
@@ -61,6 +52,12 @@ type AgentDisconnectReason =
   | "process_close"
   | "pipe_close"
   | "connection_close";
+
+type AuthSelection = {
+  methodId: string;
+  credential: string;
+  source: "env" | "config";
+};
 
 export type AgentExitInfo = {
   exitCode: number | null;
@@ -166,16 +163,68 @@ function asAbsoluteCwd(cwd: string): string {
   return path.resolve(cwd);
 }
 
-function toEnvObject(env: CreateTerminalRequest["env"]): NodeJS.ProcessEnv | undefined {
-  if (!env || env.length === 0) {
-    return undefined;
+function toEnvToken(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function authEnvKeys(methodId: string): string[] {
+  const token = toEnvToken(methodId);
+  const keys = new Set<string>([methodId]);
+  if (token) {
+    keys.add(token);
+    keys.add(`ACPX_AUTH_${token}`);
+  }
+  return [...keys];
+}
+
+function readEnvCredential(methodId: string): string | undefined {
+  for (const key of authEnvKeys(methodId)) {
+    const value = process.env[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function buildAgentEnvironment(
+  authCredentials: Record<string, string> | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (!authCredentials) {
+    return env;
   }
 
-  const merged: NodeJS.ProcessEnv = { ...process.env };
-  for (const entry of env) {
-    merged[entry.name] = entry.value;
+  for (const [methodId, credential] of Object.entries(authCredentials)) {
+    if (typeof credential !== "string" || credential.trim().length === 0) {
+      continue;
+    }
+
+    if (
+      !methodId.includes("=") &&
+      !methodId.includes("\u0000") &&
+      env[methodId] == null
+    ) {
+      env[methodId] = credential;
+    }
+
+    const normalized = toEnvToken(methodId);
+    if (normalized) {
+      const prefixed = `ACPX_AUTH_${normalized}`;
+      if (env[prefixed] == null) {
+        env[prefixed] = credential;
+      }
+      if (env[normalized] == null) {
+        env[normalized] = credential;
+      }
+    }
   }
-  return merged;
+
+  return env;
 }
 
 export class AcpClient {
@@ -189,7 +238,8 @@ export class AcpClient {
     denied: 0,
     cancelled: 0,
   };
-  private readonly terminals = new Map<string, InternalTerminal>();
+  private readonly filesystem: FileSystemHandlers;
+  private readonly terminalManager: TerminalManager;
   private sessionUpdateChain: Promise<void> = Promise.resolve();
   private observedSessionUpdates = 0;
   private processedSessionUpdates = 0;
@@ -209,6 +259,18 @@ export class AcpClient {
       ...options,
       cwd: asAbsoluteCwd(options.cwd),
     };
+
+    const emitOperation = this.options.onClientOperation;
+    this.filesystem = new FileSystemHandlers({
+      cwd: this.options.cwd,
+      permissionMode: this.options.permissionMode,
+      onOperation: emitOperation,
+    });
+    this.terminalManager = new TerminalManager({
+      cwd: this.options.cwd,
+      permissionMode: this.options.permissionMode,
+      onOperation: emitOperation,
+    });
   }
 
   get initializeResult(): InitializeResponse | undefined {
@@ -242,6 +304,16 @@ export class AcpClient {
     return Boolean(this.initResult?.agentCapabilities?.loadSession);
   }
 
+  hasActivePrompt(sessionId?: string): boolean {
+    if (!this.activePrompt) {
+      return false;
+    }
+    if (sessionId == null) {
+      return true;
+    }
+    return this.activePrompt.sessionId === sessionId;
+  }
+
   async start(): Promise<void> {
     if (this.connection && this.agent) {
       return;
@@ -252,6 +324,7 @@ export class AcpClient {
 
     const child = spawn(command, args, {
       cwd: this.options.cwd,
+      env: buildAgentEnvironment(this.options.authCredentials),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -349,6 +422,8 @@ export class AcpClient {
         },
       });
 
+      await this.authenticateIfRequired(connection, initResult.authMethods ?? []);
+
       this.connection = connection;
       this.agent = child;
       this.initResult = initResult;
@@ -426,12 +501,42 @@ export class AcpClient {
     }
   }
 
+  async setSessionMode(sessionId: string, modeId: string): Promise<void> {
+    const connection = this.getConnection();
+    await connection.setSessionMode({
+      sessionId,
+      modeId,
+    });
+  }
+
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: string,
+    value: string,
+  ): Promise<SetSessionConfigOptionResponse> {
+    const connection = this.getConnection();
+    return await connection.setSessionConfigOption({
+      sessionId,
+      configId,
+      value,
+    });
+  }
+
   async cancel(sessionId: string): Promise<void> {
     const connection = this.getConnection();
     this.cancellingSessionIds.add(sessionId);
     await connection.cancel({
       sessionId,
     });
+  }
+
+  async requestCancelActivePrompt(): Promise<boolean> {
+    const active = this.activePrompt;
+    if (!active) {
+      return false;
+    }
+    await this.cancel(active.sessionId);
+    return true;
   }
 
   async cancelActivePrompt(waitMs = 2_500): Promise<PromptResponse | undefined> {
@@ -473,9 +578,8 @@ export class AcpClient {
 
   async close(): Promise<void> {
     this.closing = true;
-    for (const terminalId of [...this.terminals.keys()]) {
-      await this.releaseTerminalById(terminalId);
-    }
+
+    await this.terminalManager.shutdown();
 
     if (this.agent && !this.agent.killed) {
       this.agent.kill();
@@ -503,6 +607,57 @@ export class AcpClient {
       return;
     }
     process.stderr.write(`[acpx] ${message}\n`);
+  }
+
+  private selectAuthMethod(methods: AuthMethod[]): AuthSelection | undefined {
+    const configCredentials = this.options.authCredentials ?? {};
+
+    for (const method of methods) {
+      const envCredential = readEnvCredential(method.id);
+      if (envCredential) {
+        return {
+          methodId: method.id,
+          credential: envCredential,
+          source: "env",
+        };
+      }
+
+      const configCredential =
+        configCredentials[method.id] ?? configCredentials[toEnvToken(method.id)];
+      if (typeof configCredential === "string" && configCredential.trim().length > 0) {
+        return {
+          methodId: method.id,
+          credential: configCredential,
+          source: "config",
+        };
+      }
+    }
+
+    return undefined;
+  }
+
+  private async authenticateIfRequired(
+    connection: ClientSideConnection,
+    methods: AuthMethod[],
+  ): Promise<void> {
+    if (methods.length === 0) {
+      return;
+    }
+
+    const selected = this.selectAuthMethod(methods);
+    if (!selected) {
+      throw new Error(
+        `Agent requires authentication, but no credentials were found for methods: ${methods
+          .map((method) => method.id)
+          .join(", ")}`,
+      );
+    }
+
+    await connection.authenticate({
+      methodId: selected.methodId,
+    });
+
+    this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
   }
 
   private async handlePermissionRequest(
@@ -575,165 +730,43 @@ export class AcpClient {
   private async handleReadTextFile(
     params: ReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    const content = await fs.readFile(params.path, "utf8");
-    if (params.line == null && params.limit == null) {
-      return { content };
-    }
-
-    const lines = content.split("\n");
-    const start = Math.max(0, (params.line ?? 1) - 1);
-    const end = params.limit == null ? lines.length : start + Math.max(params.limit, 0);
-    return {
-      content: lines.slice(start, end).join("\n"),
-    };
+    return await this.filesystem.readTextFile(params);
   }
 
   private async handleWriteTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
-    await fs.mkdir(path.dirname(params.path), { recursive: true });
-    await fs.writeFile(params.path, params.content, "utf8");
-    return {};
+    return await this.filesystem.writeTextFile(params);
   }
 
   private async handleCreateTerminal(
     params: CreateTerminalRequest,
   ): Promise<CreateTerminalResponse> {
-    const outputByteLimit = Math.max(
-      1,
-      params.outputByteLimit ?? DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES,
-    );
-
-    const proc = spawn(params.command, params.args ?? [], {
-      cwd: params.cwd ?? this.options.cwd,
-      env: toEnvObject(params.env),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    await waitForSpawn(proc);
-
-    const terminalId = randomUUID();
-    const terminal: InternalTerminal = {
-      process: proc,
-      output: Buffer.alloc(0),
-      truncated: false,
-      outputByteLimit,
-      exitCode: undefined,
-      signal: undefined,
-      waiters: [],
-    };
-
-    const appendOutput = (chunk: Buffer | string): void => {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      terminal.output = Buffer.concat([terminal.output, buf]);
-
-      if (terminal.output.length > terminal.outputByteLimit) {
-        terminal.output = terminal.output.subarray(
-          terminal.output.length - terminal.outputByteLimit,
-        );
-        terminal.truncated = true;
-      }
-    };
-
-    proc.stdout.on("data", appendOutput);
-    proc.stderr.on("data", appendOutput);
-
-    proc.once("exit", (exitCode, signal) => {
-      terminal.exitCode = exitCode;
-      terminal.signal = signal;
-      const response: WaitForTerminalExitResponse = {
-        exitCode: exitCode ?? null,
-        signal: signal ?? null,
-      };
-      for (const waiter of terminal.waiters.splice(0)) {
-        waiter(response);
-      }
-    });
-
-    this.terminals.set(terminalId, terminal);
-    return { terminalId };
+    return await this.terminalManager.createTerminal(params);
   }
 
   private async handleTerminalOutput(
     params: TerminalOutputRequest,
   ): Promise<TerminalOutputResponse> {
-    const terminal = this.getTerminal(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Unknown terminal: ${params.terminalId}`);
-    }
-
-    const hasExitStatus =
-      terminal.exitCode !== undefined || terminal.signal !== undefined;
-
-    return {
-      output: terminal.output.toString("utf8"),
-      truncated: terminal.truncated,
-      exitStatus: hasExitStatus
-        ? {
-            exitCode: terminal.exitCode ?? null,
-            signal: terminal.signal ?? null,
-          }
-        : undefined,
-    };
+    return await this.terminalManager.terminalOutput(params);
   }
 
   private async handleWaitForTerminalExit(
     params: WaitForTerminalExitRequest,
   ): Promise<WaitForTerminalExitResponse> {
-    const terminal = this.getTerminal(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Unknown terminal: ${params.terminalId}`);
-    }
-
-    if (terminal.exitCode !== undefined || terminal.signal !== undefined) {
-      return {
-        exitCode: terminal.exitCode ?? null,
-        signal: terminal.signal ?? null,
-      };
-    }
-
-    return new Promise<WaitForTerminalExitResponse>((resolve) => {
-      terminal.waiters.push(resolve);
-    });
+    return await this.terminalManager.waitForTerminalExit(params);
   }
 
   private async handleKillTerminal(
     params: KillTerminalCommandRequest,
   ): Promise<KillTerminalCommandResponse> {
-    const terminal = this.getTerminal(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Unknown terminal: ${params.terminalId}`);
-    }
-
-    if (!terminal.process.killed) {
-      terminal.process.kill();
-    }
-
-    return {};
+    return await this.terminalManager.killTerminal(params);
   }
 
   private async handleReleaseTerminal(
     params: ReleaseTerminalRequest,
   ): Promise<ReleaseTerminalResponse> {
-    await this.releaseTerminalById(params.terminalId);
-    return {};
-  }
-
-  private async releaseTerminalById(terminalId: string): Promise<void> {
-    const terminal = this.getTerminal(terminalId);
-    if (!terminal) {
-      return;
-    }
-
-    if (!terminal.process.killed) {
-      terminal.process.kill();
-    }
-
-    this.terminals.delete(terminalId);
-  }
-
-  private getTerminal(terminalId: string): InternalTerminal | undefined {
-    return this.terminals.get(terminalId);
+    return await this.terminalManager.releaseTerminal(params);
   }
 
   private async handleSessionUpdate(notification: SessionNotification): Promise<void> {

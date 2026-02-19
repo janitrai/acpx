@@ -9,15 +9,19 @@ One command surface for Codex, Claude, Gemini, OpenCode, Pi, or custom ACP serve
 - **Persistent sessions**: multi-turn conversations that survive across invocations, scoped per repo
 - **Named sessions**: run parallel workstreams in the same repo (`-s backend`, `-s frontend`)
 - **Prompt queueing**: submit prompts while one is already running, they execute in order
+- **Cooperative cancel command**: `cancel` sends ACP `session/cancel` via queue IPC without tearing down session state
 - **Soft-close lifecycle**: close sessions without deleting history from disk
 - **Queue owner TTL**: keep queue owners alive briefly for follow-up prompts (`--ttl`)
 - **Fire-and-forget**: `--no-wait` queues a prompt and returns immediately
 - **Graceful cancel**: `Ctrl+C` sends ACP `session/cancel` before force-kill fallback
+- **Session controls**: `set-mode` and `set <key> <value>` for `session/set_mode` and `session/set_config_option`
 - **Crash reconnect**: dead agent processes are detected and sessions are reloaded automatically
 - **Prompt from file/stdin**: `--file <path>` or piped stdin for prompt content
 - **Config files**: global + project JSON config with `acpx config show|init`
 - **Session inspect/history**: `sessions show` and `sessions history --limit <n>`
 - **Local status checks**: `status` reports running/dead/no-session, pid, uptime, last prompt
+- **Client methods**: stable `fs/*` and `terminal/*` handlers with permission controls and cwd sandboxing
+- **Auth handshake**: stable `authenticate` support via env/config credentials
 - **Structured output**: typed ACP messages (thinking, tool calls, diffs) instead of ANSI scraping
 - **Any ACP agent**: built-in registry + `--agent` escape hatch for custom servers
 - **One-shot mode**: `exec` for stateless fire-and-forget tasks
@@ -118,6 +122,9 @@ echo 'fix flaky tests' | acpx codex            # prompt from stdin
 acpx codex --file prompt.md                    # prompt from file
 acpx codex --file - "extra context"            # explicit stdin + appended args
 acpx codex --no-wait 'draft test migration plan' # enqueue without waiting if session is busy
+acpx codex cancel                               # cooperative cancel of in-flight prompt
+acpx codex set-mode plan                        # session/set_mode
+acpx codex set approval_policy conservative     # session/set_config_option
 acpx exec 'summarize this repo'                # default agent shortcut (codex)
 acpx codex exec 'what does this repo do?'      # one-shot, no saved session
 
@@ -195,6 +202,9 @@ Supported keys:
   "format": "text",
   "agents": {
     "my-custom": { "command": "./bin/my-acp-server" }
+  },
+  "auth": {
+    "my_auth_method_id": "credential-value"
   }
 }
 ```
@@ -245,6 +255,8 @@ acpx --agent ./my-custom-acp-server 'do something'
 - Prompt submissions are queue-aware per session. If a prompt is already running, new prompts are queued and drained by the running `acpx` process.
 - Queue owners use an idle TTL (default 300s). `--ttl <seconds>` overrides it; `--ttl 0` keeps owners alive indefinitely.
 - `--no-wait` submits to that queue and returns immediately.
+- `cancel` sends cooperative `session/cancel` to the running queue owner process and returns success when no prompt is running (`nothing to cancel`).
+- `set-mode` and `set` route through queue-owner IPC when active, otherwise they reconnect directly to apply `session/set_mode` and `session/set_config_option`.
 - `exec` is always one-shot and does not reuse saved sessions.
 - Session metadata is stored under `~/.acpx/sessions/`.
 - Each successful prompt appends lightweight turn history previews (`role`, `timestamp`, `textPreview`) to session metadata.

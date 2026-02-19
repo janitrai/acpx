@@ -1,5 +1,6 @@
 import type {
   ContentBlock,
+  SetSessionConfigOptionResponse,
   SessionNotification,
   StopReason,
 } from "@agentclientprotocol/sdk";
@@ -11,13 +12,16 @@ import os from "node:os";
 import path from "node:path";
 import { AcpClient, type AgentLifecycleSnapshot } from "./client.js";
 import type {
+  ClientOperation,
   OutputFormatter,
   PermissionMode,
-  SessionHistoryEntry,
-  SessionEnqueueResult,
-  SessionSendOutcome,
   RunPromptResult,
+  SessionEnqueueResult,
+  SessionHistoryEntry,
   SessionRecord,
+  SessionSetConfigOptionResult,
+  SessionSetModeResult,
+  SessionSendOutcome,
   SessionSendResult,
 } from "./types.js";
 
@@ -56,6 +60,7 @@ export type RunOnceOptions = {
   cwd: string;
   message: string;
   permissionMode: PermissionMode;
+  authCredentials?: Record<string, string>;
   outputFormatter: OutputFormatter;
   verbose?: boolean;
 } & TimedRunOptions;
@@ -65,6 +70,7 @@ export type SessionCreateOptions = {
   cwd: string;
   name?: string;
   permissionMode: PermissionMode;
+  authCredentials?: Record<string, string>;
   verbose?: boolean;
 } & TimedRunOptions;
 
@@ -72,10 +78,36 @@ export type SessionSendOptions = {
   sessionId: string;
   message: string;
   permissionMode: PermissionMode;
+  authCredentials?: Record<string, string>;
   outputFormatter: OutputFormatter;
   verbose?: boolean;
   waitForCompletion?: boolean;
   ttlMs?: number;
+} & TimedRunOptions;
+
+export type SessionCancelOptions = {
+  sessionId: string;
+  verbose?: boolean;
+};
+
+export type SessionCancelResult = {
+  sessionId: string;
+  cancelled: boolean;
+};
+
+export type SessionSetModeOptions = {
+  sessionId: string;
+  modeId: string;
+  authCredentials?: Record<string, string>;
+  verbose?: boolean;
+} & TimedRunOptions;
+
+export type SessionSetConfigOptionOptions = {
+  sessionId: string;
+  configId: string;
+  value: string;
+  authCredentials?: Record<string, string>;
+  verbose?: boolean;
 } & TimedRunOptions;
 
 function sessionFilePath(id: string): string {
@@ -693,6 +725,32 @@ type QueueSubmitRequest = {
   waitForCompletion: boolean;
 };
 
+type QueueCancelRequest = {
+  type: "cancel_prompt";
+  requestId: string;
+};
+
+type QueueSetModeRequest = {
+  type: "set_mode";
+  requestId: string;
+  modeId: string;
+  timeoutMs?: number;
+};
+
+type QueueSetConfigOptionRequest = {
+  type: "set_config_option";
+  requestId: string;
+  configId: string;
+  value: string;
+  timeoutMs?: number;
+};
+
+type QueueRequest =
+  | QueueSubmitRequest
+  | QueueCancelRequest
+  | QueueSetModeRequest
+  | QueueSetConfigOptionRequest;
+
 type QueueOwnerAcceptedMessage = {
   type: "accepted";
   requestId: string;
@@ -702,6 +760,12 @@ type QueueOwnerSessionUpdateMessage = {
   type: "session_update";
   requestId: string;
   notification: SessionNotification;
+};
+
+type QueueOwnerClientOperationMessage = {
+  type: "client_operation";
+  requestId: string;
+  operation: ClientOperation;
 };
 
 type QueueOwnerDoneMessage = {
@@ -716,6 +780,24 @@ type QueueOwnerResultMessage = {
   result: SessionSendResult;
 };
 
+type QueueOwnerCancelResultMessage = {
+  type: "cancel_result";
+  requestId: string;
+  cancelled: boolean;
+};
+
+type QueueOwnerSetModeResultMessage = {
+  type: "set_mode_result";
+  requestId: string;
+  modeId: string;
+};
+
+type QueueOwnerSetConfigOptionResultMessage = {
+  type: "set_config_option_result";
+  requestId: string;
+  response: SetSessionConfigOptionResponse;
+};
+
 type QueueOwnerErrorMessage = {
   type: "error";
   requestId: string;
@@ -725,8 +807,12 @@ type QueueOwnerErrorMessage = {
 type QueueOwnerMessage =
   | QueueOwnerAcceptedMessage
   | QueueOwnerSessionUpdateMessage
+  | QueueOwnerClientOperationMessage
   | QueueOwnerDoneMessage
   | QueueOwnerResultMessage
+  | QueueOwnerCancelResultMessage
+  | QueueOwnerSetModeResultMessage
+  | QueueOwnerSetConfigOptionResultMessage
   | QueueOwnerErrorMessage;
 
 type QueueTask = {
@@ -743,9 +829,22 @@ type RunSessionPromptOptions = {
   sessionRecordId: string;
   message: string;
   permissionMode: PermissionMode;
+  authCredentials?: Record<string, string>;
   outputFormatter: OutputFormatter;
   timeoutMs?: number;
   verbose?: boolean;
+  onClientAvailable?: (controller: ActiveSessionController) => void;
+  onClientClosed?: () => void;
+};
+
+type ActiveSessionController = {
+  hasActivePrompt: () => boolean;
+  requestCancelActivePrompt: () => Promise<boolean>;
+  setSessionMode: (modeId: string) => Promise<void>;
+  setSessionConfigOption: (
+    configId: string,
+    value: string,
+  ) => Promise<SetSessionConfigOptionResponse>;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -781,19 +880,13 @@ function parseQueueOwnerRecord(raw: unknown): QueueOwnerRecord | null {
   };
 }
 
-function parseQueueSubmitRequest(raw: unknown): QueueSubmitRequest | null {
+function parseQueueRequest(raw: unknown): QueueRequest | null {
   const request = asRecord(raw);
   if (!request) {
     return null;
   }
 
-  if (
-    request.type !== "submit_prompt" ||
-    typeof request.requestId !== "string" ||
-    typeof request.message !== "string" ||
-    !isPermissionMode(request.permissionMode) ||
-    typeof request.waitForCompletion !== "boolean"
-  ) {
+  if (typeof request.type !== "string" || typeof request.requestId !== "string") {
     return null;
   }
 
@@ -803,14 +896,63 @@ function parseQueueSubmitRequest(raw: unknown): QueueSubmitRequest | null {
       ? Math.round(timeoutRaw)
       : undefined;
 
-  return {
-    type: "submit_prompt",
-    requestId: request.requestId,
-    message: request.message,
-    permissionMode: request.permissionMode,
-    timeoutMs,
-    waitForCompletion: request.waitForCompletion,
-  };
+  if (request.type === "submit_prompt") {
+    if (
+      typeof request.message !== "string" ||
+      !isPermissionMode(request.permissionMode) ||
+      typeof request.waitForCompletion !== "boolean"
+    ) {
+      return null;
+    }
+
+    return {
+      type: "submit_prompt",
+      requestId: request.requestId,
+      message: request.message,
+      permissionMode: request.permissionMode,
+      timeoutMs,
+      waitForCompletion: request.waitForCompletion,
+    };
+  }
+
+  if (request.type === "cancel_prompt") {
+    return {
+      type: "cancel_prompt",
+      requestId: request.requestId,
+    };
+  }
+
+  if (request.type === "set_mode") {
+    if (typeof request.modeId !== "string" || request.modeId.trim().length === 0) {
+      return null;
+    }
+    return {
+      type: "set_mode",
+      requestId: request.requestId,
+      modeId: request.modeId,
+      timeoutMs,
+    };
+  }
+
+  if (request.type === "set_config_option") {
+    if (
+      typeof request.configId !== "string" ||
+      request.configId.trim().length === 0 ||
+      typeof request.value !== "string" ||
+      request.value.trim().length === 0
+    ) {
+      return null;
+    }
+    return {
+      type: "set_config_option",
+      requestId: request.requestId,
+      configId: request.configId,
+      value: request.value,
+      timeoutMs,
+    };
+  }
+
+  return null;
 }
 
 function parseSessionSendResult(raw: unknown): SessionSendResult | null {
@@ -885,6 +1027,31 @@ function parseQueueOwnerMessage(raw: unknown): QueueOwnerMessage | null {
     };
   }
 
+  if (message.type === "client_operation") {
+    const operation = asRecord(message.operation);
+    if (
+      !operation ||
+      typeof operation.method !== "string" ||
+      typeof operation.status !== "string" ||
+      typeof operation.summary !== "string" ||
+      typeof operation.timestamp !== "string"
+    ) {
+      return null;
+    }
+    if (
+      operation.status !== "running" &&
+      operation.status !== "completed" &&
+      operation.status !== "failed"
+    ) {
+      return null;
+    }
+    return {
+      type: "client_operation",
+      requestId: message.requestId,
+      operation: operation as ClientOperation,
+    };
+  }
+
   if (message.type === "done") {
     if (typeof message.stopReason !== "string") {
       return null;
@@ -905,6 +1072,40 @@ function parseQueueOwnerMessage(raw: unknown): QueueOwnerMessage | null {
       type: "result",
       requestId: message.requestId,
       result: parsedResult,
+    };
+  }
+
+  if (message.type === "cancel_result") {
+    if (typeof message.cancelled !== "boolean") {
+      return null;
+    }
+    return {
+      type: "cancel_result",
+      requestId: message.requestId,
+      cancelled: message.cancelled,
+    };
+  }
+
+  if (message.type === "set_mode_result") {
+    if (typeof message.modeId !== "string") {
+      return null;
+    }
+    return {
+      type: "set_mode_result",
+      requestId: message.requestId,
+      modeId: message.modeId,
+    };
+  }
+
+  if (message.type === "set_config_option_result") {
+    const response = asRecord(message.response);
+    if (!response || !Array.isArray(response.configOptions)) {
+      return null;
+    }
+    return {
+      type: "set_config_option_result",
+      requestId: message.requestId,
+      response: response as SetSessionConfigOptionResponse,
     };
   }
 
@@ -1119,6 +1320,14 @@ class QueueTaskOutputFormatter implements OutputFormatter {
     });
   }
 
+  onClientOperation(operation: ClientOperation): void {
+    this.send({
+      type: "client_operation",
+      requestId: this.requestId,
+      operation,
+    });
+  }
+
   onDone(stopReason: StopReason): void {
     this.send({
       type: "done",
@@ -1136,6 +1345,9 @@ const DISCARD_OUTPUT_FORMATTER: OutputFormatter = {
   onSessionUpdate() {
     // no-op
   },
+  onClientOperation() {
+    // no-op
+  },
   onDone() {
     // no-op
   },
@@ -1144,22 +1356,37 @@ const DISCARD_OUTPUT_FORMATTER: OutputFormatter = {
   },
 };
 
+type QueueOwnerControlHandlers = {
+  cancelPrompt: () => Promise<boolean>;
+  setSessionMode: (modeId: string, timeoutMs?: number) => Promise<void>;
+  setSessionConfigOption: (
+    configId: string,
+    value: string,
+    timeoutMs?: number,
+  ) => Promise<SetSessionConfigOptionResponse>;
+};
+
 class SessionQueueOwner {
   private readonly server: net.Server;
+  private readonly controlHandlers: QueueOwnerControlHandlers;
   private readonly pending: QueueTask[] = [];
   private readonly waiters: Array<(task: QueueTask | undefined) => void> = [];
   private closed = false;
 
-  private constructor(server: net.Server) {
+  private constructor(server: net.Server, controlHandlers: QueueOwnerControlHandlers) {
     this.server = server;
+    this.controlHandlers = controlHandlers;
   }
 
-  static async start(lease: QueueOwnerLease): Promise<SessionQueueOwner> {
+  static async start(
+    lease: QueueOwnerLease,
+    controlHandlers: QueueOwnerControlHandlers,
+  ): Promise<SessionQueueOwner> {
     const ownerRef: { current: SessionQueueOwner | undefined } = { current: undefined };
     const server = net.createServer((socket) => {
       ownerRef.current?.handleConnection(socket);
     });
-    ownerRef.current = new SessionQueueOwner(server);
+    ownerRef.current = new SessionQueueOwner(server, controlHandlers);
 
     await new Promise<void>((resolve, reject) => {
       const onListening = () => {
@@ -1300,9 +1527,99 @@ class SessionQueueOwner {
         return;
       }
 
-      const request = parseQueueSubmitRequest(parsed);
+      const request = parseQueueRequest(parsed);
       if (!request) {
         fail("unknown", "Invalid queue request");
+        return;
+      }
+
+      if (request.type === "cancel_prompt") {
+        writeQueueMessage(socket, {
+          type: "accepted",
+          requestId: request.requestId,
+        });
+        void this.controlHandlers
+          .cancelPrompt()
+          .then((cancelled) => {
+            writeQueueMessage(socket, {
+              type: "cancel_result",
+              requestId: request.requestId,
+              cancelled,
+            });
+          })
+          .catch((error) => {
+            const message = formatError(error);
+            writeQueueMessage(socket, {
+              type: "error",
+              requestId: request.requestId,
+              message,
+            });
+          })
+          .finally(() => {
+            if (!socket.destroyed) {
+              socket.end();
+            }
+          });
+        return;
+      }
+
+      if (request.type === "set_mode") {
+        writeQueueMessage(socket, {
+          type: "accepted",
+          requestId: request.requestId,
+        });
+        void this.controlHandlers
+          .setSessionMode(request.modeId, request.timeoutMs)
+          .then(() => {
+            writeQueueMessage(socket, {
+              type: "set_mode_result",
+              requestId: request.requestId,
+              modeId: request.modeId,
+            });
+          })
+          .catch((error) => {
+            const message = formatError(error);
+            writeQueueMessage(socket, {
+              type: "error",
+              requestId: request.requestId,
+              message,
+            });
+          })
+          .finally(() => {
+            if (!socket.destroyed) {
+              socket.end();
+            }
+          });
+        return;
+      }
+
+      if (request.type === "set_config_option") {
+        writeQueueMessage(socket, {
+          type: "accepted",
+          requestId: request.requestId,
+        });
+        void this.controlHandlers
+          .setSessionConfigOption(request.configId, request.value, request.timeoutMs)
+          .then((response) => {
+            writeQueueMessage(socket, {
+              type: "set_config_option_result",
+              requestId: request.requestId,
+              response,
+            });
+          })
+          .catch((error) => {
+            const message = formatError(error);
+            writeQueueMessage(socket, {
+              type: "error",
+              requestId: request.requestId,
+              message,
+            });
+          })
+          .finally(() => {
+            if (!socket.destroyed) {
+              socket.end();
+            }
+          });
         return;
       }
 
@@ -1454,6 +1771,11 @@ async function submitToQueueOwner(
         return;
       }
 
+      if (message.type === "client_operation") {
+        options.outputFormatter.onClientOperation(message.operation);
+        return;
+      }
+
       if (message.type === "done") {
         options.outputFormatter.onDone(message.stopReason);
         sawDone = true;
@@ -1469,7 +1791,12 @@ async function submitToQueueOwner(
         return;
       }
 
-      finishReject(new Error(message.message));
+      if (message.type === "error") {
+        finishReject(new Error(message.message));
+        return;
+      }
+
+      finishReject(new Error("Queue owner returned unexpected response"));
     };
 
     socket.on("data", (chunk: string) => {
@@ -1521,6 +1848,198 @@ async function submitToQueueOwner(
   });
 }
 
+async function submitControlToQueueOwner<TResponse extends QueueOwnerMessage>(
+  owner: QueueOwnerRecord,
+  request: QueueRequest,
+  isExpectedResponse: (message: QueueOwnerMessage) => message is TResponse,
+): Promise<TResponse | undefined> {
+  const socket = await connectToQueueOwner(owner);
+  if (!socket) {
+    return undefined;
+  }
+
+  socket.setEncoding("utf8");
+
+  return await new Promise<TResponse>((resolve, reject) => {
+    let settled = false;
+    let acknowledged = false;
+    let buffer = "";
+
+    const finishResolve = (result: TResponse) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      if (!socket.destroyed) {
+        socket.end();
+      }
+      resolve(result);
+    };
+
+    const finishReject = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+      reject(error);
+    };
+
+    const processLine = (line: string): void => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        finishReject(new Error("Queue owner sent invalid JSON payload"));
+        return;
+      }
+
+      const message = parseQueueOwnerMessage(parsed);
+      if (!message || message.requestId !== request.requestId) {
+        finishReject(new Error("Queue owner sent malformed message"));
+        return;
+      }
+
+      if (message.type === "accepted") {
+        acknowledged = true;
+        return;
+      }
+
+      if (!acknowledged) {
+        finishReject(new Error("Queue owner did not acknowledge request"));
+        return;
+      }
+
+      if (message.type === "error") {
+        finishReject(new Error(message.message));
+        return;
+      }
+
+      if (!isExpectedResponse(message)) {
+        finishReject(new Error("Queue owner returned unexpected response"));
+        return;
+      }
+
+      finishResolve(message);
+    };
+
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+
+      let index = buffer.indexOf("\n");
+      while (index >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+
+        if (line.length > 0) {
+          processLine(line);
+        }
+
+        index = buffer.indexOf("\n");
+      }
+    });
+
+    socket.once("error", (error) => {
+      finishReject(error);
+    });
+
+    socket.once("close", () => {
+      if (settled) {
+        return;
+      }
+      if (!acknowledged) {
+        finishReject(
+          new Error("Queue owner disconnected before acknowledging request"),
+        );
+        return;
+      }
+      finishReject(new Error("Queue owner disconnected before responding"));
+    });
+
+    socket.write(`${JSON.stringify(request)}\n`);
+  });
+}
+
+async function submitCancelToQueueOwner(
+  owner: QueueOwnerRecord,
+): Promise<boolean | undefined> {
+  const request: QueueCancelRequest = {
+    type: "cancel_prompt",
+    requestId: randomUUID(),
+  };
+  const response = await submitControlToQueueOwner(
+    owner,
+    request,
+    (message): message is QueueOwnerCancelResultMessage =>
+      message.type === "cancel_result",
+  );
+  if (!response) {
+    return undefined;
+  }
+  if (response.requestId !== request.requestId) {
+    throw new Error("Queue owner returned mismatched cancel response");
+  }
+  return response.cancelled;
+}
+
+async function submitSetModeToQueueOwner(
+  owner: QueueOwnerRecord,
+  modeId: string,
+  timeoutMs?: number,
+): Promise<boolean | undefined> {
+  const request: QueueSetModeRequest = {
+    type: "set_mode",
+    requestId: randomUUID(),
+    modeId,
+    timeoutMs,
+  };
+  const response = await submitControlToQueueOwner(
+    owner,
+    request,
+    (message): message is QueueOwnerSetModeResultMessage =>
+      message.type === "set_mode_result",
+  );
+  if (!response) {
+    return undefined;
+  }
+  if (response.requestId !== request.requestId) {
+    throw new Error("Queue owner returned mismatched set_mode response");
+  }
+  return true;
+}
+
+async function submitSetConfigOptionToQueueOwner(
+  owner: QueueOwnerRecord,
+  configId: string,
+  value: string,
+  timeoutMs?: number,
+): Promise<SetSessionConfigOptionResponse | undefined> {
+  const request: QueueSetConfigOptionRequest = {
+    type: "set_config_option",
+    requestId: randomUUID(),
+    configId,
+    value,
+    timeoutMs,
+  };
+  const response = await submitControlToQueueOwner(
+    owner,
+    request,
+    (message): message is QueueOwnerSetConfigOptionResultMessage =>
+      message.type === "set_config_option_result",
+  );
+  if (!response) {
+    return undefined;
+  }
+  if (response.requestId !== request.requestId) {
+    throw new Error("Queue owner returned mismatched set_config_option response");
+  }
+  return response.response;
+}
+
 async function trySubmitToRunningOwner(
   options: SubmitToQueueOwnerOptions,
 ): Promise<SessionSendOutcome | undefined> {
@@ -1552,10 +2071,122 @@ async function trySubmitToRunningOwner(
   throw new Error("Session queue owner is running but not accepting queue requests");
 }
 
+async function tryCancelOnRunningOwner(
+  options: SessionCancelOptions,
+): Promise<boolean | undefined> {
+  const owner = await readQueueOwnerRecord(options.sessionId);
+  if (!owner) {
+    return undefined;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(options.sessionId, owner);
+    return undefined;
+  }
+
+  const cancelled = await submitCancelToQueueOwner(owner);
+  if (cancelled !== undefined) {
+    if (options.verbose) {
+      process.stderr.write(
+        `[acpx] requested cancel on active owner pid ${owner.pid} for session ${options.sessionId}\n`,
+      );
+    }
+    return cancelled;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(options.sessionId, owner);
+    return undefined;
+  }
+
+  throw new Error("Session queue owner is running but not accepting cancel requests");
+}
+
+async function trySetModeOnRunningOwner(
+  sessionId: string,
+  modeId: string,
+  timeoutMs: number | undefined,
+  verbose: boolean | undefined,
+): Promise<boolean | undefined> {
+  const owner = await readQueueOwnerRecord(sessionId);
+  if (!owner) {
+    return undefined;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(sessionId, owner);
+    return undefined;
+  }
+
+  const submitted = await submitSetModeToQueueOwner(owner, modeId, timeoutMs);
+  if (submitted) {
+    if (verbose) {
+      process.stderr.write(
+        `[acpx] requested session/set_mode on owner pid ${owner.pid} for session ${sessionId}\n`,
+      );
+    }
+    return true;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(sessionId, owner);
+    return undefined;
+  }
+
+  throw new Error("Session queue owner is running but not accepting set_mode requests");
+}
+
+async function trySetConfigOptionOnRunningOwner(
+  sessionId: string,
+  configId: string,
+  value: string,
+  timeoutMs: number | undefined,
+  verbose: boolean | undefined,
+): Promise<SetSessionConfigOptionResponse | undefined> {
+  const owner = await readQueueOwnerRecord(sessionId);
+  if (!owner) {
+    return undefined;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(sessionId, owner);
+    return undefined;
+  }
+
+  const response = await submitSetConfigOptionToQueueOwner(
+    owner,
+    configId,
+    value,
+    timeoutMs,
+  );
+  if (response) {
+    if (verbose) {
+      process.stderr.write(
+        `[acpx] requested session/set_config_option on owner pid ${owner.pid} for session ${sessionId}\n`,
+      );
+    }
+    return response;
+  }
+
+  if (!isProcessAlive(owner.pid)) {
+    await cleanupStaleQueueOwner(sessionId, owner);
+    return undefined;
+  }
+
+  throw new Error(
+    "Session queue owner is running but not accepting set_config_option requests",
+  );
+}
+
 async function runQueuedTask(
   sessionRecordId: string,
   task: QueueTask,
-  verbose?: boolean,
+  options: {
+    verbose?: boolean;
+    authCredentials?: Record<string, string>;
+    onClientAvailable?: (controller: ActiveSessionController) => void;
+    onClientClosed?: () => void;
+  },
 ): Promise<void> {
   const outputFormatter = task.waitForCompletion
     ? new QueueTaskOutputFormatter(task)
@@ -1566,9 +2197,12 @@ async function runQueuedTask(
       sessionRecordId,
       message: task.message,
       permissionMode: task.permissionMode,
+      authCredentials: options.authCredentials,
       outputFormatter,
       timeoutMs: task.timeoutMs,
-      verbose,
+      verbose: options.verbose,
+      onClientAvailable: options.onClientAvailable,
+      onClientClosed: options.onClientClosed,
     });
 
     if (task.waitForCompletion) {
@@ -1622,6 +2256,7 @@ async function runSessionPrompt(
     agentCommand: record.agentCommand,
     cwd: absolutePath(record.cwd),
     permissionMode: options.permissionMode,
+    authCredentials: options.authCredentials,
     verbose: options.verbose,
     onSessionUpdate: (notification) => {
       output.onSessionUpdate(notification);
@@ -1630,12 +2265,33 @@ async function runSessionPrompt(
         assistantSnippets.push(entry.textPreview);
       }
     },
+    onClientOperation: (operation) => {
+      output.onClientOperation(operation);
+    },
   });
+  let activeSessionIdForControl = record.sessionId;
+  let notifiedClientAvailable = false;
+  const activeController: ActiveSessionController = {
+    hasActivePrompt: () => client.hasActivePrompt(),
+    requestCancelActivePrompt: async () => await client.requestCancelActivePrompt(),
+    setSessionMode: async (modeId: string) => {
+      await client.setSessionMode(activeSessionIdForControl, modeId);
+    },
+    setSessionConfigOption: async (configId: string, value: string) => {
+      return await client.setSessionConfigOption(
+        activeSessionIdForControl,
+        configId,
+        value,
+      );
+    },
+  };
 
   try {
     return await withInterrupt(
       async () => {
         await withTimeout(client.start(), options.timeoutMs);
+        options.onClientAvailable?.(activeController);
+        notifiedClientAvailable = true;
         applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
         record.closed = false;
         record.closedAt = undefined;
@@ -1665,6 +2321,7 @@ async function runSessionPrompt(
               options.timeoutMs,
             );
             record.sessionId = activeSessionId;
+            activeSessionIdForControl = activeSessionId;
           }
         } else {
           activeSessionId = await withTimeout(
@@ -1672,8 +2329,10 @@ async function runSessionPrompt(
             options.timeoutMs,
           );
           record.sessionId = activeSessionId;
+          activeSessionIdForControl = activeSessionId;
         }
 
+        activeSessionIdForControl = activeSessionId;
         let response;
         try {
           response = await withTimeout(
@@ -1743,6 +2402,9 @@ async function runSessionPrompt(
       },
     );
   } finally {
+    if (notifiedClientAvailable) {
+      options.onClientClosed?.();
+    }
     await client.close();
     applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
     await writeSessionRecord(record).catch(() => {
@@ -1751,14 +2413,235 @@ async function runSessionPrompt(
   }
 }
 
+type WithConnectedSessionOptions<T> = {
+  sessionRecordId: string;
+  permissionMode?: PermissionMode;
+  authCredentials?: Record<string, string>;
+  timeoutMs?: number;
+  verbose?: boolean;
+  onClientAvailable?: (controller: ActiveSessionController) => void;
+  onClientClosed?: () => void;
+  run: (client: AcpClient, sessionId: string, record: SessionRecord) => Promise<T>;
+};
+
+type WithConnectedSessionResult<T> = {
+  value: T;
+  record: SessionRecord;
+  resumed: boolean;
+  loadError?: string;
+};
+
+async function withConnectedSession<T>(
+  options: WithConnectedSessionOptions<T>,
+): Promise<WithConnectedSessionResult<T>> {
+  const record = await resolveSessionRecord(options.sessionRecordId);
+  const storedProcessAlive = isProcessAlive(record.pid);
+  const shouldReconnect = Boolean(record.pid) && !storedProcessAlive;
+
+  if (options.verbose) {
+    if (storedProcessAlive) {
+      process.stderr.write(
+        `[acpx] saved session pid ${record.pid} is running; reconnecting with loadSession\n`,
+      );
+    } else if (shouldReconnect) {
+      process.stderr.write(
+        `[acpx] saved session pid ${record.pid} is dead; respawning agent and attempting session/load\n`,
+      );
+    }
+  }
+
+  const client = new AcpClient({
+    agentCommand: record.agentCommand,
+    cwd: absolutePath(record.cwd),
+    permissionMode: options.permissionMode ?? "approve-reads",
+    authCredentials: options.authCredentials,
+    verbose: options.verbose,
+  });
+  let activeSessionIdForControl = record.sessionId;
+  let notifiedClientAvailable = false;
+  const activeController: ActiveSessionController = {
+    hasActivePrompt: () => client.hasActivePrompt(),
+    requestCancelActivePrompt: async () => await client.requestCancelActivePrompt(),
+    setSessionMode: async (modeId: string) => {
+      await client.setSessionMode(activeSessionIdForControl, modeId);
+    },
+    setSessionConfigOption: async (configId: string, value: string) => {
+      return await client.setSessionConfigOption(
+        activeSessionIdForControl,
+        configId,
+        value,
+      );
+    },
+  };
+
+  try {
+    return await withInterrupt(
+      async () => {
+        await withTimeout(client.start(), options.timeoutMs);
+        options.onClientAvailable?.(activeController);
+        notifiedClientAvailable = true;
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+        record.closed = false;
+        record.closedAt = undefined;
+        await writeSessionRecord(record);
+
+        let resumed = false;
+        let loadError: string | undefined;
+        let activeSessionId = record.sessionId;
+
+        if (client.supportsLoadSession()) {
+          try {
+            await withTimeout(
+              client.loadSessionWithOptions(record.sessionId, record.cwd, {
+                suppressReplayUpdates: true,
+              }),
+              options.timeoutMs,
+            );
+            resumed = true;
+          } catch (error) {
+            loadError = formatError(error);
+            if (!shouldFallbackToNewSession(error)) {
+              throw error;
+            }
+            activeSessionId = await withTimeout(
+              client.createSession(record.cwd),
+              options.timeoutMs,
+            );
+            record.sessionId = activeSessionId;
+            activeSessionIdForControl = activeSessionId;
+          }
+        } else {
+          activeSessionId = await withTimeout(
+            client.createSession(record.cwd),
+            options.timeoutMs,
+          );
+          record.sessionId = activeSessionId;
+          activeSessionIdForControl = activeSessionId;
+        }
+
+        activeSessionIdForControl = activeSessionId;
+        const value = await options.run(client, activeSessionId, record);
+
+        const now = isoNow();
+        record.lastUsedAt = now;
+        record.closed = false;
+        record.closedAt = undefined;
+        record.protocolVersion = client.initializeResult?.protocolVersion;
+        record.agentCapabilities = client.initializeResult?.agentCapabilities;
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+        await writeSessionRecord(record);
+
+        return {
+          value,
+          record,
+          resumed,
+          loadError,
+        };
+      },
+      async () => {
+        await client.cancelActivePrompt(INTERRUPT_CANCEL_WAIT_MS);
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+        record.lastUsedAt = isoNow();
+        await writeSessionRecord(record).catch(() => {
+          // best effort while process is being interrupted
+        });
+        await client.close();
+      },
+    );
+  } finally {
+    if (notifiedClientAvailable) {
+      options.onClientClosed?.();
+    }
+    await client.close();
+    applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+    await writeSessionRecord(record).catch(() => {
+      // best effort on close
+    });
+  }
+}
+
+type RunSessionSetModeDirectOptions = {
+  sessionRecordId: string;
+  modeId: string;
+  authCredentials?: Record<string, string>;
+  timeoutMs?: number;
+  verbose?: boolean;
+  onClientAvailable?: (controller: ActiveSessionController) => void;
+  onClientClosed?: () => void;
+};
+
+type RunSessionSetConfigOptionDirectOptions = {
+  sessionRecordId: string;
+  configId: string;
+  value: string;
+  authCredentials?: Record<string, string>;
+  timeoutMs?: number;
+  verbose?: boolean;
+  onClientAvailable?: (controller: ActiveSessionController) => void;
+  onClientClosed?: () => void;
+};
+
+async function runSessionSetModeDirect(
+  options: RunSessionSetModeDirectOptions,
+): Promise<SessionSetModeResult> {
+  const result = await withConnectedSession({
+    sessionRecordId: options.sessionRecordId,
+    authCredentials: options.authCredentials,
+    timeoutMs: options.timeoutMs,
+    verbose: options.verbose,
+    onClientAvailable: options.onClientAvailable,
+    onClientClosed: options.onClientClosed,
+    run: async (client, sessionId) => {
+      await withTimeout(
+        client.setSessionMode(sessionId, options.modeId),
+        options.timeoutMs,
+      );
+    },
+  });
+
+  return {
+    record: result.record,
+    resumed: result.resumed,
+    loadError: result.loadError,
+  };
+}
+
+async function runSessionSetConfigOptionDirect(
+  options: RunSessionSetConfigOptionDirectOptions,
+): Promise<SessionSetConfigOptionResult> {
+  const result = await withConnectedSession({
+    sessionRecordId: options.sessionRecordId,
+    authCredentials: options.authCredentials,
+    timeoutMs: options.timeoutMs,
+    verbose: options.verbose,
+    onClientAvailable: options.onClientAvailable,
+    onClientClosed: options.onClientClosed,
+    run: async (client, sessionId) => {
+      return await withTimeout(
+        client.setSessionConfigOption(sessionId, options.configId, options.value),
+        options.timeoutMs,
+      );
+    },
+  });
+
+  return {
+    record: result.record,
+    response: result.value,
+    resumed: result.resumed,
+    loadError: result.loadError,
+  };
+}
+
 export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult> {
   const output = options.outputFormatter;
   const client = new AcpClient({
     agentCommand: options.agentCommand,
     cwd: absolutePath(options.cwd),
     permissionMode: options.permissionMode,
+    authCredentials: options.authCredentials,
     verbose: options.verbose,
     onSessionUpdate: (notification) => output.onSessionUpdate(notification),
+    onClientOperation: (operation) => output.onClientOperation(operation),
   });
 
   try {
@@ -1794,6 +2677,7 @@ export async function createSession(
     agentCommand: options.agentCommand,
     cwd: absolutePath(options.cwd),
     permissionMode: options.permissionMode,
+    authCredentials: options.authCredentials,
     verbose: options.verbose,
   });
 
@@ -1876,16 +2760,67 @@ export async function sendSession(
     }
 
     let owner: SessionQueueOwner | undefined;
+    let activeController: ActiveSessionController | undefined;
+    const setActiveController = (controller: ActiveSessionController) => {
+      activeController = controller;
+    };
+    const clearActiveController = () => {
+      activeController = undefined;
+    };
     try {
-      owner = await SessionQueueOwner.start(lease);
+      owner = await SessionQueueOwner.start(lease, {
+        cancelPrompt: async () => {
+          if (!activeController || !activeController.hasActivePrompt()) {
+            return false;
+          }
+          return await activeController.requestCancelActivePrompt();
+        },
+        setSessionMode: async (modeId: string, timeoutMs?: number) => {
+          if (activeController) {
+            await withTimeout(activeController.setSessionMode(modeId), timeoutMs);
+            return;
+          }
+          await runSessionSetModeDirect({
+            sessionRecordId: options.sessionId,
+            modeId,
+            authCredentials: options.authCredentials,
+            timeoutMs,
+            verbose: options.verbose,
+          });
+        },
+        setSessionConfigOption: async (
+          configId: string,
+          value: string,
+          timeoutMs?: number,
+        ) => {
+          if (activeController) {
+            return await withTimeout(
+              activeController.setSessionConfigOption(configId, value),
+              timeoutMs,
+            );
+          }
+          const result = await runSessionSetConfigOptionDirect({
+            sessionRecordId: options.sessionId,
+            configId,
+            value,
+            authCredentials: options.authCredentials,
+            timeoutMs,
+            verbose: options.verbose,
+          });
+          return result.response;
+        },
+      });
 
       const localResult = await runSessionPrompt({
         sessionRecordId: options.sessionId,
         message: options.message,
         permissionMode: options.permissionMode,
+        authCredentials: options.authCredentials,
         outputFormatter: options.outputFormatter,
         timeoutMs: options.timeoutMs,
         verbose: options.verbose,
+        onClientAvailable: setActiveController,
+        onClientClosed: clearActiveController,
       });
 
       const idleWaitMs =
@@ -1901,7 +2836,12 @@ export async function sendSession(
           }
           break;
         }
-        await runQueuedTask(options.sessionId, task, options.verbose);
+        await runQueuedTask(options.sessionId, task, {
+          verbose: options.verbose,
+          authCredentials: options.authCredentials,
+          onClientAvailable: setActiveController,
+          onClientClosed: clearActiveController,
+        });
       }
 
       return localResult;
@@ -1912,6 +2852,69 @@ export async function sendSession(
       await releaseQueueOwnerLease(lease);
     }
   }
+}
+
+export async function cancelSessionPrompt(
+  options: SessionCancelOptions,
+): Promise<SessionCancelResult> {
+  const cancelled = await tryCancelOnRunningOwner(options);
+  return {
+    sessionId: options.sessionId,
+    cancelled: cancelled === true,
+  };
+}
+
+export async function setSessionMode(
+  options: SessionSetModeOptions,
+): Promise<SessionSetModeResult> {
+  const submittedToOwner = await trySetModeOnRunningOwner(
+    options.sessionId,
+    options.modeId,
+    options.timeoutMs,
+    options.verbose,
+  );
+  if (submittedToOwner) {
+    return {
+      record: await resolveSessionRecord(options.sessionId),
+      resumed: false,
+    };
+  }
+
+  return await runSessionSetModeDirect({
+    sessionRecordId: options.sessionId,
+    modeId: options.modeId,
+    authCredentials: options.authCredentials,
+    timeoutMs: options.timeoutMs,
+    verbose: options.verbose,
+  });
+}
+
+export async function setSessionConfigOption(
+  options: SessionSetConfigOptionOptions,
+): Promise<SessionSetConfigOptionResult> {
+  const ownerResponse = await trySetConfigOptionOnRunningOwner(
+    options.sessionId,
+    options.configId,
+    options.value,
+    options.timeoutMs,
+    options.verbose,
+  );
+  if (ownerResponse) {
+    return {
+      record: await resolveSessionRecord(options.sessionId),
+      response: ownerResponse,
+      resumed: false,
+    };
+  }
+
+  return await runSessionSetConfigOptionDirect({
+    sessionRecordId: options.sessionId,
+    configId: options.configId,
+    value: options.value,
+    authCredentials: options.authCredentials,
+    timeoutMs: options.timeoutMs,
+    verbose: options.verbose,
+  });
 }
 
 export async function listSessions(): Promise<SessionRecord[]> {

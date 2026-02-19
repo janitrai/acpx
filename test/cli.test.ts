@@ -141,6 +141,45 @@ test("prompt exits with NO_SESSION when no session exists (no auto-create)", asy
   });
 });
 
+test("set-mode exits with NO_SESSION when no session exists", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace", "packages", "app");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(["--cwd", cwd, "codex", "set-mode", "plan"], homeDir);
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+  });
+});
+
+test("set command exits with NO_SESSION when no session exists", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace", "packages", "app");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "set", "temperature", "high"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+  });
+});
+
+test("cancel prints nothing to cancel and exits success when no session exists", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace", "packages", "app");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(["--cwd", cwd, "codex", "cancel"], homeDir);
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /nothing to cancel/);
+  });
+});
+
 test("prompt reads from stdin when no prompt argument is provided", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");

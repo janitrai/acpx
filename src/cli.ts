@@ -23,6 +23,7 @@ import {
   DEFAULT_QUEUE_OWNER_TTL_MS,
   InterruptedError,
   TimeoutError,
+  cancelSessionPrompt,
   closeSession,
   createSession,
   findGitRepositoryRoot,
@@ -31,6 +32,8 @@ import {
   isProcessAlive,
   listSessionsForAgent,
   runOnce,
+  setSessionConfigOption,
+  setSessionMode,
   sendSession,
 } from "./session.js";
 import {
@@ -88,6 +91,9 @@ type StatusFlags = {
 const TOP_LEVEL_VERBS = new Set([
   "prompt",
   "exec",
+  "cancel",
+  "set-mode",
+  "set",
   "sessions",
   "status",
   "config",
@@ -123,6 +129,14 @@ function parseSessionName(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
     throw new InvalidArgumentError("Session name must not be empty");
+  }
+  return trimmed;
+}
+
+function parseNonEmptyValue(label: string, value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new InvalidArgumentError(`${label} must not be empty`);
   }
   return trimmed;
 }
@@ -486,6 +500,34 @@ function printCreatedSessionBanner(
   process.stderr.write(`[acpx] cwd: ${record.cwd}\n`);
 }
 
+async function findRoutedSessionOrThrow(
+  agentCommand: string,
+  agentName: string,
+  cwd: string,
+  sessionName: string | undefined,
+): Promise<SessionRecord> {
+  const gitRoot = findGitRepositoryRoot(cwd);
+  const walkBoundary = gitRoot ?? cwd;
+
+  const record = await findSessionByDirectoryWalk({
+    agentCommand,
+    cwd,
+    name: sessionName,
+    boundary: walkBoundary,
+  });
+
+  if (record) {
+    return record;
+  }
+
+  const createCmd = sessionName
+    ? `acpx ${agentName} sessions new --name ${sessionName}`
+    : `acpx ${agentName} sessions new`;
+  throw new NoSessionError(
+    `⚠ No acpx session found (searched up to ${walkBoundary}).\nCreate one: ${createCmd}`,
+  );
+}
+
 async function handlePrompt(
   explicitAgentName: string | undefined,
   promptParts: string[],
@@ -498,24 +540,12 @@ async function handlePrompt(
   const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
   const outputFormatter = createOutputFormatter(globalFlags.format);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
-  const gitRoot = findGitRepositoryRoot(agent.cwd);
-  const walkBoundary = gitRoot ?? agent.cwd;
-
-  const record = await findSessionByDirectoryWalk({
-    agentCommand: agent.agentCommand,
-    cwd: agent.cwd,
-    name: flags.session,
-    boundary: walkBoundary,
-  });
-
-  if (!record) {
-    const createCmd = flags.session
-      ? `acpx ${agent.agentName} sessions new --name ${flags.session}`
-      : `acpx ${agent.agentName} sessions new`;
-    throw new NoSessionError(
-      `⚠ No acpx session found (searched up to ${walkBoundary}).\nCreate one: ${createCmd}`,
-    );
-  }
+  const record = await findRoutedSessionOrThrow(
+    agent.agentCommand,
+    agent.agentName,
+    agent.cwd,
+    flags.session,
+  );
 
   printPromptSessionBanner(record, agent.cwd, globalFlags.format);
 
@@ -523,6 +553,7 @@ async function handlePrompt(
     sessionId: record.id,
     message: prompt,
     permissionMode,
+    authCredentials: config.auth,
     outputFormatter,
     timeoutMs: globalFlags.timeout,
     ttlMs: globalFlags.ttl,
@@ -562,12 +593,188 @@ async function handleExec(
     cwd: agent.cwd,
     message: prompt,
     permissionMode,
+    authCredentials: config.auth,
     outputFormatter,
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
 
   applyPermissionExitCode(result);
+}
+
+function printCancelResultByFormat(
+  result: { sessionId: string; cancelled: boolean },
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+
+  if (result.cancelled) {
+    process.stdout.write("cancel requested\n");
+    return;
+  }
+
+  process.stdout.write("nothing to cancel\n");
+}
+
+function printSetModeResultByFormat(
+  modeId: string,
+  result: { record: SessionRecord; resumed: boolean; loadError?: string },
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        sessionId: result.record.id,
+        modeId,
+        resumed: result.resumed,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    process.stdout.write(`${modeId}\n`);
+    return;
+  }
+
+  process.stdout.write(`mode set: ${modeId}\n`);
+}
+
+function printSetConfigOptionResultByFormat(
+  configId: string,
+  value: string,
+  result: {
+    record: SessionRecord;
+    resumed: boolean;
+    response: { configOptions: unknown[] };
+  },
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        sessionId: result.record.id,
+        configId,
+        value,
+        resumed: result.resumed,
+        configOptions: result.response.configOptions,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    process.stdout.write(`${value}\n`);
+    return;
+  }
+
+  process.stdout.write(
+    `config set: ${configId}=${value} (${result.response.configOptions.length} options)\n`,
+  );
+}
+
+async function handleCancel(
+  explicitAgentName: string | undefined,
+  flags: StatusFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const gitRoot = findGitRepositoryRoot(agent.cwd);
+  const walkBoundary = gitRoot ?? agent.cwd;
+  const record = await findSessionByDirectoryWalk({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.session,
+    boundary: walkBoundary,
+  });
+
+  if (!record) {
+    printCancelResultByFormat(
+      {
+        sessionId: "",
+        cancelled: false,
+      },
+      globalFlags.format,
+    );
+    return;
+  }
+
+  const result = await cancelSessionPrompt({
+    sessionId: record.id,
+    verbose: globalFlags.verbose,
+  });
+  printCancelResultByFormat(result, globalFlags.format);
+}
+
+async function handleSetMode(
+  explicitAgentName: string | undefined,
+  modeId: string,
+  flags: StatusFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const record = await findRoutedSessionOrThrow(
+    agent.agentCommand,
+    agent.agentName,
+    agent.cwd,
+    flags.session,
+  );
+  const result = await setSessionMode({
+    sessionId: record.id,
+    modeId,
+    authCredentials: config.auth,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  if (globalFlags.verbose && result.loadError) {
+    process.stderr.write(
+      `[acpx] loadSession failed, started fresh session: ${result.loadError}\n`,
+    );
+  }
+
+  printSetModeResultByFormat(modeId, result, globalFlags.format);
+}
+
+async function handleSetConfigOption(
+  explicitAgentName: string | undefined,
+  configId: string,
+  value: string,
+  flags: StatusFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const record = await findRoutedSessionOrThrow(
+    agent.agentCommand,
+    agent.agentName,
+    agent.cwd,
+    flags.session,
+  );
+  const result = await setSessionConfigOption({
+    sessionId: record.id,
+    configId,
+    value,
+    authCredentials: config.auth,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  if (globalFlags.verbose && result.loadError) {
+    process.stderr.write(
+      `[acpx] loadSession failed, started fresh session: ${result.loadError}\n`,
+    );
+  }
+
+  printSetConfigOptionResultByFormat(configId, value, result, globalFlags.format);
 }
 
 async function handleSessionsList(
@@ -638,6 +845,7 @@ async function handleSessionsNew(
     cwd: agent.cwd,
     name: flags.name,
     permissionMode,
+    authCredentials: config.auth,
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
@@ -1046,6 +1254,48 @@ function registerAgentCommand(
     await handleExec(agentName, promptParts, flags, this, config);
   });
 
+  const cancelCommand = agentCommand
+    .command("cancel")
+    .description("Cooperatively cancel current in-flight prompt");
+  addSessionNameOption(cancelCommand);
+  cancelCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleCancel(agentName, flags, this, config);
+  });
+
+  const setModeCommand = agentCommand
+    .command("set-mode")
+    .description("Set session mode")
+    .argument("<mode>", "Mode id", (value: string) =>
+      parseNonEmptyValue("Mode", value),
+    );
+  addSessionNameOption(setModeCommand);
+  setModeCommand.action(async function (
+    this: Command,
+    modeId: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetMode(agentName, modeId, flags, this, config);
+  });
+
+  const setConfigCommand = agentCommand
+    .command("set")
+    .description("Set session config option")
+    .argument("<key>", "Config option id", (value: string) =>
+      parseNonEmptyValue("Config option key", value),
+    )
+    .argument("<value>", "Config option value", (value: string) =>
+      parseNonEmptyValue("Config option value", value),
+    );
+  addSessionNameOption(setConfigCommand);
+  setConfigCommand.action(async function (
+    this: Command,
+    key: string,
+    value: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetConfigOption(agentName, key, value, flags, this, config);
+  });
+
   const statusCommand = agentCommand
     .command("status")
     .description("Show local status of current session agent process");
@@ -1109,6 +1359,48 @@ function registerDefaultCommands(program: Command, config: ResolvedAcpxConfig): 
     flags: ExecFlags,
   ) {
     await handleExec(undefined, promptParts, flags, this, config);
+  });
+
+  const cancelCommand = program
+    .command("cancel")
+    .description(`Cancel active prompt for ${config.defaultAgent} by default`);
+  addSessionNameOption(cancelCommand);
+  cancelCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleCancel(undefined, flags, this, config);
+  });
+
+  const setModeCommand = program
+    .command("set-mode")
+    .description(`Set session mode for ${config.defaultAgent} by default`)
+    .argument("<mode>", "Mode id", (value: string) =>
+      parseNonEmptyValue("Mode", value),
+    );
+  addSessionNameOption(setModeCommand);
+  setModeCommand.action(async function (
+    this: Command,
+    modeId: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetMode(undefined, modeId, flags, this, config);
+  });
+
+  const setConfigCommand = program
+    .command("set")
+    .description(`Set session config option for ${config.defaultAgent} by default`)
+    .argument("<key>", "Config option id", (value: string) =>
+      parseNonEmptyValue("Config option key", value),
+    )
+    .argument("<value>", "Config option value", (value: string) =>
+      parseNonEmptyValue("Config option value", value),
+    );
+  addSessionNameOption(setConfigCommand);
+  setConfigCommand.action(async function (
+    this: Command,
+    key: string,
+    value: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetConfigOption(undefined, key, value, flags, this, config);
   });
 
   const statusCommand = program
@@ -1268,6 +1560,9 @@ Examples:
   acpx codex prompt "fix the tests"
   acpx codex --no-wait "queue follow-up task"
   acpx codex exec "what does this repo do"
+  acpx codex cancel
+  acpx codex set-mode plan
+  acpx codex set approval_policy conservative
   acpx codex -s backend "fix the API"
   acpx codex sessions
   acpx codex sessions new --name backend

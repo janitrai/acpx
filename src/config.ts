@@ -15,6 +15,7 @@ type ConfigFileShape = {
   timeout?: unknown;
   format?: unknown;
   agents?: unknown;
+  auth?: unknown;
 };
 
 export type ResolvedAcpxConfig = {
@@ -24,6 +25,7 @@ export type ResolvedAcpxConfig = {
   timeoutMs?: number;
   format: OutputFormat;
   agents: Record<string, string>;
+  auth: Record<string, string>;
   globalPath: string;
   projectPath: string;
   hasGlobalConfig: boolean;
@@ -157,6 +159,29 @@ function parseAgents(
   return parsed;
 }
 
+function parseAuth(
+  value: unknown,
+  sourcePath: string,
+): Record<string, string> | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (!isObject(value)) {
+    throw new Error(`Invalid config auth in ${sourcePath}: expected object`);
+  }
+
+  const parsed: Record<string, string> = {};
+  for (const [methodId, rawCredential] of Object.entries(value)) {
+    if (typeof rawCredential !== "string" || rawCredential.trim().length === 0) {
+      throw new Error(
+        `Invalid config auth.${methodId} in ${sourcePath}: expected non-empty string`,
+      );
+    }
+    parsed[methodId] = rawCredential;
+  }
+  return parsed;
+}
+
 async function readConfigFile(filePath: string): Promise<ConfigFileLoadResult> {
   try {
     const payload = await fs.readFile(filePath, "utf8");
@@ -192,6 +217,16 @@ function mergeAgents(
   return {
     ...(globalAgents ?? {}),
     ...(projectAgents ?? {}),
+  };
+}
+
+function mergeAuth(
+  globalAuth: Record<string, string> | undefined,
+  projectAuth: Record<string, string> | undefined,
+): Record<string, string> {
+  return {
+    ...(globalAuth ?? {}),
+    ...(projectAuth ?? {}),
   };
 }
 
@@ -244,6 +279,10 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
     parseAgents(globalConfig?.agents, globalPath),
     parseAgents(projectConfig?.agents, projectPath),
   );
+  const auth = mergeAuth(
+    parseAuth(globalConfig?.auth, globalPath),
+    parseAuth(projectConfig?.auth, projectPath),
+  );
 
   return {
     defaultAgent,
@@ -252,6 +291,7 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
     timeoutMs,
     format,
     agents,
+    auth,
     globalPath,
     projectPath,
     hasGlobalConfig: globalResult.exists,
@@ -266,6 +306,7 @@ export function toConfigDisplay(config: ResolvedAcpxConfig): {
   timeout: number | null;
   format: OutputFormat;
   agents: Record<string, ConfigAgentEntry>;
+  authMethods: string[];
 } {
   const agents: Record<string, ConfigAgentEntry> = {};
   for (const [name, command] of Object.entries(config.agents)) {
@@ -279,6 +320,7 @@ export function toConfigDisplay(config: ResolvedAcpxConfig): {
     timeout: config.timeoutMs == null ? null : config.timeoutMs / 1_000,
     format: config.format,
     agents,
+    authMethods: Object.keys(config.auth).sort(),
   };
 }
 
@@ -306,6 +348,7 @@ export async function initGlobalConfigFile(): Promise<{
     timeout: null,
     format: "text",
     agents: {},
+    auth: {},
   };
 
   await fs.writeFile(configPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");

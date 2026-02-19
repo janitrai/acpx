@@ -23,6 +23,9 @@ Global options apply to all commands.
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
 acpx [global_options] exec [prompt_options] [prompt_text...]
+acpx [global_options] cancel [-s <name>]
+acpx [global_options] set-mode <mode> [-s <name>]
+acpx [global_options] set <key> <value> [-s <name>]
 acpx [global_options] status [-s <name>]
 acpx [global_options] sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 acpx [global_options] config [show | init]
@@ -30,6 +33,9 @@ acpx [global_options] config [show | init]
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
 acpx [global_options] <agent> exec [prompt_options] [prompt_text...]
+acpx [global_options] <agent> cancel [-s <name>]
+acpx [global_options] <agent> set-mode <mode> [-s <name>]
+acpx [global_options] <agent> set <key> <value> [-s <name>]
 acpx [global_options] <agent> status [-s <name>]
 acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 ```
@@ -50,7 +56,7 @@ Prompt options:
 
 Notes:
 
-- Top-level `prompt`, `exec`, `sessions`, and bare `acpx <prompt>` default to `codex`.
+- Top-level `prompt`, `exec`, `cancel`, `set-mode`, `set`, `sessions`, and bare `acpx <prompt>` default to `codex`.
 - If a prompt argument is omitted, `acpx` reads prompt text from stdin when piped.
 - `--file` works for implicit prompt, `prompt`, and `exec` commands.
 - `acpx` with no args in an interactive terminal shows help.
@@ -175,6 +181,44 @@ Behavior:
 - Does not write/use a saved session record
 - Supports prompt text from args, stdin, `--file <path>`, and `--file -`
 
+## `cancel` command
+
+```bash
+acpx [global_options] <agent> cancel [-s <name>]
+acpx [global_options] cancel [-s <name>]   # defaults to codex
+```
+
+Behavior:
+
+- Sends cooperative `session/cancel` through queue-owner IPC when a prompt is running.
+- If no prompt is running, prints `nothing to cancel` and exits success.
+
+## `set-mode` command
+
+```bash
+acpx [global_options] <agent> set-mode <mode> [-s <name>]
+acpx [global_options] set-mode <mode> [-s <name>]   # defaults to codex
+```
+
+Behavior:
+
+- Calls ACP `session/set_mode`.
+- Routes through queue-owner IPC when an owner is active.
+- Falls back to a direct client reconnect when no owner is running.
+
+## `set` command
+
+```bash
+acpx [global_options] <agent> set <key> <value> [-s <name>]
+acpx [global_options] set <key> <value> [-s <name>]   # defaults to codex
+```
+
+Behavior:
+
+- Calls ACP `session/set_config_option`.
+- Routes through queue-owner IPC when an owner is active.
+- Falls back to a direct client reconnect when no owner is running.
+
 ## `sessions` subcommand
 
 ```bash
@@ -250,6 +294,9 @@ Supported keys:
   "format": "text",
   "agents": {
     "my-custom": { "command": "./bin/my-acp-server" }
+  },
+  "auth": {
+    "my_auth_method_id": "credential-value"
   }
 }
 ```
@@ -332,8 +379,8 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 
 ### Prompt/exec output behavior
 
-- `text`: assistant text, tool status blocks, plan updates, and `[done] <reason>`
-- `json`: one JSON object per line with event types like `text`, `thought`, `tool_call`, `plan`, `update`, `done`
+- `text`: assistant text, tool status blocks, client-operation logs, plan updates, and `[done] <reason>`
+- `json`: one JSON object per line with event types like `text`, `thought`, `tool_call`, `client_operation`, `plan`, `update`, `done`
 - `quiet`: concatenated assistant text only
 
 ### Sessions command output behavior

@@ -23,6 +23,9 @@ test("loadResolvedConfig merges global and project config with project priority"
           agents: {
             custom: { command: "global-custom" },
           },
+          auth: {
+            global_method: "global-token",
+          },
         },
         null,
         2,
@@ -42,6 +45,10 @@ test("loadResolvedConfig merges global and project config with project priority"
             custom: { command: "project-custom" },
             extra: { command: "./bin/extra" },
           },
+          auth: {
+            global_method: "project-override",
+            project_method: "project-token",
+          },
         },
         null,
         2,
@@ -58,6 +65,10 @@ test("loadResolvedConfig merges global and project config with project priority"
     assert.deepEqual(config.agents, {
       custom: "project-custom",
       extra: "./bin/extra",
+    });
+    assert.deepEqual(config.auth, {
+      global_method: "project-override",
+      project_method: "project-token",
     });
     assert.equal(config.hasGlobalConfig, true);
     assert.equal(config.hasProjectConfig, true);

@@ -99,6 +99,41 @@ test("json formatter emits valid NDJSON", () => {
   assert.equal(parsed[2]?.type, "done");
 });
 
+test("text formatter renders client operation updates", () => {
+  const writer = new CaptureWriter();
+  const formatter = createOutputFormatter("text", { stdout: writer });
+
+  formatter.onClientOperation({
+    method: "fs/read_text_file",
+    status: "completed",
+    summary: "read_text_file: /tmp/demo.txt",
+    details: "line=1, limit=20",
+    timestamp: new Date().toISOString(),
+  });
+
+  const output = writer.toString();
+  assert.match(output, /\[client\] read_text_file: \/tmp\/demo.txt \(completed\)/);
+  assert.match(output, /line=1, limit=20/);
+});
+
+test("json formatter emits client operation NDJSON events", () => {
+  const writer = new CaptureWriter();
+  const formatter = createOutputFormatter("json", { stdout: writer });
+
+  formatter.onClientOperation({
+    method: "terminal/create",
+    status: "running",
+    summary: "terminal/create: node -e \"console.log('hi')\"",
+    timestamp: new Date().toISOString(),
+  });
+
+  const line = writer.toString().trim();
+  const parsed = JSON.parse(line) as { type: string; method: string; status: string };
+  assert.equal(parsed.type, "client_operation");
+  assert.equal(parsed.method, "terminal/create");
+  assert.equal(parsed.status, "running");
+});
+
 test("quiet formatter suppresses non-text output", () => {
   const writer = new CaptureWriter();
   const formatter = createOutputFormatter("quiet", { stdout: writer });
