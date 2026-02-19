@@ -236,7 +236,7 @@ acpx [global_options] config init
 
 Config files:
 
-- global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+- global: `~/.acpx/config.json`
 - project: `<cwd>/.acpxrc.json` (merged on top of global)
 
 Supported keys:

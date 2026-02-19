@@ -265,12 +265,11 @@ test("status reports running process when session pid is alive", async () => {
 test("config defaults are loaded from global and project config files", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
-    const xdgConfigHome = path.join(homeDir, "xdg");
     await fs.mkdir(cwd, { recursive: true });
-    await fs.mkdir(path.join(xdgConfigHome, "acpx"), { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
 
     await fs.writeFile(
-      path.join(xdgConfigHome, "acpx", "config.json"),
+      path.join(homeDir, ".acpx", "config.json"),
       `${JSON.stringify(
         {
           defaultAgent: "codex",
@@ -308,9 +307,7 @@ test("config defaults are loaded from global and project config files", async ()
       closed: false,
     });
 
-    const result = await runCli(["--cwd", cwd, "my-custom", "sessions"], homeDir, {
-      xdgConfigHome,
-    });
+    const result = await runCli(["--cwd", cwd, "my-custom", "sessions"], homeDir);
 
     assert.equal(result.code, 0, result.stderr);
     assert.doesNotThrow(() => JSON.parse(result.stdout.trim()));
@@ -329,7 +326,6 @@ async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<vo
 
 type CliRunOptions = {
   stdin?: string;
-  xdgConfigHome?: string;
   cwd?: string;
 };
 
@@ -343,7 +339,6 @@ async function runCli(
       env: {
         ...process.env,
         HOME: homeDir,
-        ...(options.xdgConfigHome ? { XDG_CONFIG_HOME: options.xdgConfigHome } : {}),
       },
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],

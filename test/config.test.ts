@@ -6,13 +6,13 @@ import test from "node:test";
 import { initGlobalConfigFile, loadResolvedConfig } from "../src/config.js";
 
 test("loadResolvedConfig merges global and project config with project priority", async () => {
-  await withTempEnv(async ({ homeDir, xdgConfigHome }) => {
+  await withTempEnv(async ({ homeDir }) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
-    await fs.mkdir(path.join(xdgConfigHome, "acpx"), { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
 
     await fs.writeFile(
-      path.join(xdgConfigHome, "acpx", "config.json"),
+      path.join(homeDir, ".acpx", "config.json"),
       `${JSON.stringify(
         {
           defaultAgent: "codex",
@@ -65,10 +65,10 @@ test("loadResolvedConfig merges global and project config with project priority"
 });
 
 test("initGlobalConfigFile creates the config once and then reports existing file", async () => {
-  await withTempEnv(async ({ xdgConfigHome }) => {
+  await withTempEnv(async ({ homeDir }) => {
     const first = await initGlobalConfigFile();
     assert.equal(first.created, true);
-    assert.equal(first.path, path.join(xdgConfigHome, "acpx", "config.json"));
+    assert.equal(first.path, path.join(homeDir, ".acpx", "config.json"));
 
     const second = await initGlobalConfigFile();
     assert.equal(second.created, false);
@@ -84,29 +84,20 @@ test("initGlobalConfigFile creates the config once and then reports existing fil
 });
 
 async function withTempEnv(
-  run: (ctx: { homeDir: string; xdgConfigHome: string }) => Promise<void>,
+  run: (ctx: { homeDir: string }) => Promise<void>,
 ): Promise<void> {
   const originalHome = process.env.HOME;
-  const originalXdg = process.env.XDG_CONFIG_HOME;
 
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-config-home-"));
-  const xdgConfigHome = path.join(homeDir, "xdg");
   process.env.HOME = homeDir;
-  process.env.XDG_CONFIG_HOME = xdgConfigHome;
 
   try {
-    await run({ homeDir, xdgConfigHome });
+    await run({ homeDir });
   } finally {
     if (originalHome == null) {
       delete process.env.HOME;
     } else {
       process.env.HOME = originalHome;
-    }
-
-    if (originalXdg == null) {
-      delete process.env.XDG_CONFIG_HOME;
-    } else {
-      process.env.XDG_CONFIG_HOME = originalXdg;
     }
 
     await fs.rm(homeDir, { recursive: true, force: true });

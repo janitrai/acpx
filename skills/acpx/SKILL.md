@@ -167,7 +167,7 @@ Permission flags are mutually exclusive.
 
 Config files are merged in this order (later wins):
 
-- global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+- global: `~/.acpx/config.json`
 - project: `<cwd>/.acpxrc.json`
 
 Supported keys:

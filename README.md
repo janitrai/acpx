@@ -137,7 +137,7 @@ acpx codex sessions close api    # close cwd-scoped named session
 acpx codex status                # local process status for current session
 
 acpx config show                 # show resolved config (global + project)
-acpx config init                 # create ~/.config/acpx/config.json template
+acpx config init                 # create ~/.acpx/config.json template
 
 acpx claude 'refactor auth middleware' # built-in claude agent
 acpx gemini 'add startup logging'      # built-in gemini agent
@@ -179,7 +179,7 @@ acpx --verbose codex 'debug why adapter startup is failing'
 
 `acpx` reads config in this order (later wins):
 
-1. global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+1. global: `~/.acpx/config.json`
 2. project: `<cwd>/.acpxrc.json`
 
 CLI flags always win over config values.

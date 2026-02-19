@@ -47,12 +47,7 @@ const VALID_PERMISSION_MODES = new Set<PermissionMode>([
 const VALID_OUTPUT_FORMATS = new Set<OutputFormat>(["text", "json", "quiet"]);
 
 function defaultGlobalConfigPath(): string {
-  const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim();
-  const base =
-    xdgConfigHome && xdgConfigHome.length > 0
-      ? xdgConfigHome
-      : path.join(os.homedir(), ".config");
-  return path.join(base, "acpx", "config.json");
+  return path.join(os.homedir(), ".acpx", "config.json");
 }
 
 function projectConfigPath(cwd: string): string {
