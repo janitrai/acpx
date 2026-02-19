@@ -518,6 +518,73 @@ test("cancelSessionPrompt sends cancel request to active queue owner", async () 
   });
 });
 
+test("QueueOwnerCancelCoordinator cancels immediately for active prompts", async () => {
+  await withTempHome(async () => {
+    const session = await loadSessionModule();
+    const coordinator = new session.QueueOwnerCancelCoordinator();
+    let cancelCalls = 0;
+
+    coordinator.beginTurn();
+    const cancelled = await coordinator.requestCancel({
+      hasActivePrompt: () => true,
+      requestCancelActivePrompt: async () => {
+        cancelCalls += 1;
+        return true;
+      },
+    });
+
+    assert.equal(cancelled, true);
+    assert.equal(cancelCalls, 1);
+    assert.equal(coordinator.hasPendingCancel, false);
+    coordinator.endTurn();
+  });
+});
+
+test("QueueOwnerCancelCoordinator defers cancel while turn is starting", async () => {
+  await withTempHome(async () => {
+    const session = await loadSessionModule();
+    const coordinator = new session.QueueOwnerCancelCoordinator();
+    let promptActive = false;
+    let cancelCalls = 0;
+
+    const controller = {
+      hasActivePrompt: () => promptActive,
+      requestCancelActivePrompt: async () => {
+        cancelCalls += 1;
+        return promptActive;
+      },
+    };
+
+    coordinator.beginTurn();
+    const accepted = await coordinator.requestCancel(controller);
+    assert.equal(accepted, true);
+    assert.equal(cancelCalls, 0);
+    assert.equal(coordinator.hasPendingCancel, true);
+
+    const beforeActive = await coordinator.applyPendingCancel(controller);
+    assert.equal(beforeActive, false);
+    assert.equal(cancelCalls, 0);
+    assert.equal(coordinator.hasPendingCancel, true);
+
+    promptActive = true;
+    const afterActive = await coordinator.applyPendingCancel(controller);
+    assert.equal(afterActive, true);
+    assert.equal(cancelCalls, 1);
+    assert.equal(coordinator.hasPendingCancel, false);
+    coordinator.endTurn();
+  });
+});
+
+test("QueueOwnerCancelCoordinator returns false when idle", async () => {
+  await withTempHome(async () => {
+    const session = await loadSessionModule();
+    const coordinator = new session.QueueOwnerCancelCoordinator();
+    const cancelled = await coordinator.requestCancel(undefined);
+    assert.equal(cancelled, false);
+    assert.equal(coordinator.hasPendingCancel, false);
+  });
+});
+
 async function loadSessionModule(): Promise<SessionModule> {
   const cacheBuster = `${Date.now()}-${Math.random()}`;
   return (await import(

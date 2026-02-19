@@ -835,6 +835,7 @@ type RunSessionPromptOptions = {
   verbose?: boolean;
   onClientAvailable?: (controller: ActiveSessionController) => void;
   onClientClosed?: () => void;
+  onPromptIssued?: () => Promise<void> | void;
 };
 
 type ActiveSessionController = {
@@ -846,6 +847,62 @@ type ActiveSessionController = {
     value: string,
   ) => Promise<SetSessionConfigOptionResponse>;
 };
+
+type CancelCapableController = Pick<
+  ActiveSessionController,
+  "hasActivePrompt" | "requestCancelActivePrompt"
+>;
+
+export class QueueOwnerCancelCoordinator {
+  private turnInFlight = false;
+  private pendingCancel = false;
+
+  beginTurn(): void {
+    this.turnInFlight = true;
+  }
+
+  endTurn(): void {
+    this.turnInFlight = false;
+    this.pendingCancel = false;
+  }
+
+  async requestCancel(
+    controller: CancelCapableController | undefined,
+  ): Promise<boolean> {
+    if (controller?.hasActivePrompt()) {
+      const cancelled = await controller.requestCancelActivePrompt();
+      if (cancelled) {
+        this.pendingCancel = false;
+      }
+      return cancelled;
+    }
+
+    if (this.turnInFlight) {
+      this.pendingCancel = true;
+      return true;
+    }
+
+    return false;
+  }
+
+  async applyPendingCancel(
+    controller: CancelCapableController | undefined,
+  ): Promise<boolean> {
+    if (!this.pendingCancel || !controller || !controller.hasActivePrompt()) {
+      return false;
+    }
+
+    const cancelled = await controller.requestCancelActivePrompt();
+    if (cancelled) {
+      this.pendingCancel = false;
+    }
+    return cancelled;
+  }
+
+  get hasPendingCancel(): boolean {
+    return this.pendingCancel;
+  }
+}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -2186,6 +2243,7 @@ async function runQueuedTask(
     authCredentials?: Record<string, string>;
     onClientAvailable?: (controller: ActiveSessionController) => void;
     onClientClosed?: () => void;
+    onPromptIssued?: () => Promise<void> | void;
   },
 ): Promise<void> {
   const outputFormatter = task.waitForCompletion
@@ -2203,6 +2261,7 @@ async function runQueuedTask(
       verbose: options.verbose,
       onClientAvailable: options.onClientAvailable,
       onClientClosed: options.onClientClosed,
+      onPromptIssued: options.onPromptIssued,
     });
 
     if (task.waitForCompletion) {
@@ -2335,10 +2394,19 @@ async function runSessionPrompt(
         activeSessionIdForControl = activeSessionId;
         let response;
         try {
-          response = await withTimeout(
-            client.prompt(activeSessionId, options.message),
-            options.timeoutMs,
-          );
+          const promptPromise = client.prompt(activeSessionId, options.message);
+          if (options.onPromptIssued) {
+            try {
+              await options.onPromptIssued();
+            } catch (error) {
+              if (options.verbose) {
+                process.stderr.write(
+                  `[acpx] onPromptIssued hook failed: ${formatError(error)}\n`,
+                );
+              }
+            }
+          }
+          response = await withTimeout(promptPromise, options.timeoutMs);
         } catch (error) {
           const snapshot = client.getAgentLifecycleSnapshot();
           applyLifecycleSnapshotToRecord(record, snapshot);
@@ -2761,19 +2829,48 @@ export async function sendSession(
 
     let owner: SessionQueueOwner | undefined;
     let activeController: ActiveSessionController | undefined;
+    const cancelCoordinator = new QueueOwnerCancelCoordinator();
+
+    const applyPendingCancel = async (): Promise<boolean> => {
+      return await cancelCoordinator.applyPendingCancel(activeController);
+    };
+
+    const scheduleApplyPendingCancel = (): void => {
+      void applyPendingCancel().catch((error) => {
+        if (options.verbose) {
+          process.stderr.write(
+            `[acpx] failed to apply deferred cancel: ${formatError(error)}\n`,
+          );
+        }
+      });
+    };
+
     const setActiveController = (controller: ActiveSessionController) => {
       activeController = controller;
+      scheduleApplyPendingCancel();
     };
     const clearActiveController = () => {
       activeController = undefined;
     };
+
+    const runPromptTurn = async <T>(run: () => Promise<T>): Promise<T> => {
+      cancelCoordinator.beginTurn();
+      try {
+        return await run();
+      } finally {
+        cancelCoordinator.endTurn();
+      }
+    };
+
     try {
       owner = await SessionQueueOwner.start(lease, {
         cancelPrompt: async () => {
-          if (!activeController || !activeController.hasActivePrompt()) {
+          const accepted = await cancelCoordinator.requestCancel(activeController);
+          if (!accepted) {
             return false;
           }
-          return await activeController.requestCancelActivePrompt();
+          await applyPendingCancel();
+          return true;
         },
         setSessionMode: async (modeId: string, timeoutMs?: number) => {
           if (activeController) {
@@ -2811,16 +2908,21 @@ export async function sendSession(
         },
       });
 
-      const localResult = await runSessionPrompt({
-        sessionRecordId: options.sessionId,
-        message: options.message,
-        permissionMode: options.permissionMode,
-        authCredentials: options.authCredentials,
-        outputFormatter: options.outputFormatter,
-        timeoutMs: options.timeoutMs,
-        verbose: options.verbose,
-        onClientAvailable: setActiveController,
-        onClientClosed: clearActiveController,
+      const localResult = await runPromptTurn(async () => {
+        return await runSessionPrompt({
+          sessionRecordId: options.sessionId,
+          message: options.message,
+          permissionMode: options.permissionMode,
+          authCredentials: options.authCredentials,
+          outputFormatter: options.outputFormatter,
+          timeoutMs: options.timeoutMs,
+          verbose: options.verbose,
+          onClientAvailable: setActiveController,
+          onClientClosed: clearActiveController,
+          onPromptIssued: async () => {
+            await applyPendingCancel();
+          },
+        });
       });
 
       const idleWaitMs =
@@ -2836,11 +2938,16 @@ export async function sendSession(
           }
           break;
         }
-        await runQueuedTask(options.sessionId, task, {
-          verbose: options.verbose,
-          authCredentials: options.authCredentials,
-          onClientAvailable: setActiveController,
-          onClientClosed: clearActiveController,
+        await runPromptTurn(async () => {
+          await runQueuedTask(options.sessionId, task, {
+            verbose: options.verbose,
+            authCredentials: options.authCredentials,
+            onClientAvailable: setActiveController,
+            onClientClosed: clearActiveController,
+            onPromptIssued: async () => {
+              await applyPendingCancel();
+            },
+          });
         });
       }
 
