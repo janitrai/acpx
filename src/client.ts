@@ -56,6 +56,31 @@ type LoadSessionOptions = {
   replayDrainTimeoutMs?: number;
 };
 
+type AgentDisconnectReason =
+  | "process_exit"
+  | "process_close"
+  | "pipe_close"
+  | "connection_close";
+
+export type AgentExitInfo = {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  exitedAt: string;
+  reason: AgentDisconnectReason;
+  unexpectedDuringPrompt: boolean;
+};
+
+export type AgentLifecycleSnapshot = {
+  pid?: number;
+  startedAt?: string;
+  running: boolean;
+  lastExit?: AgentExitInfo;
+};
+
+function isoNow(): string {
+  return new Date().toISOString();
+}
+
 function waitForSpawn(child: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
     const onSpawn = () => {
@@ -169,6 +194,15 @@ export class AcpClient {
   private observedSessionUpdates = 0;
   private processedSessionUpdates = 0;
   private suppressSessionUpdates = false;
+  private activePrompt?: {
+    sessionId: string;
+    promise: Promise<PromptResponse>;
+  };
+  private readonly cancellingSessionIds = new Set<string>();
+  private closing = false;
+  private agentStartedAt?: string;
+  private lastAgentExit?: AgentExitInfo;
+  private lastKnownPid?: number;
 
   constructor(options: AcpClientOptions) {
     this.options = {
@@ -182,11 +216,26 @@ export class AcpClient {
   }
 
   getAgentPid(): number | undefined {
-    return this.agent?.pid ?? undefined;
+    return this.agent?.pid ?? this.lastKnownPid;
   }
 
   getPermissionStats(): PermissionStats {
     return { ...this.permissionStats };
+  }
+
+  getAgentLifecycleSnapshot(): AgentLifecycleSnapshot {
+    const pid = this.agent?.pid ?? this.lastKnownPid;
+    const running =
+      Boolean(this.agent) &&
+      this.agent?.exitCode == null &&
+      this.agent?.signalCode == null &&
+      !this.agent?.killed;
+    return {
+      pid,
+      startedAt: this.agentStartedAt,
+      running,
+      lastExit: this.lastAgentExit ? { ...this.lastAgentExit } : undefined,
+    };
   }
 
   supportsLoadSession(): boolean {
@@ -207,6 +256,11 @@ export class AcpClient {
     });
 
     await waitForSpawn(child);
+    this.closing = false;
+    this.agentStartedAt = isoNow();
+    this.lastAgentExit = undefined;
+    this.lastKnownPid = child.pid ?? undefined;
+    this.attachAgentLifecycleObservers(child);
 
     child.stderr.on("data", (chunk: Buffer | string) => {
       if (!this.options.verbose) {
@@ -266,6 +320,17 @@ export class AcpClient {
         },
       }),
       stream,
+    );
+    connection.signal.addEventListener(
+      "abort",
+      () => {
+        this.recordAgentExit(
+          "connection_close",
+          child.exitCode ?? null,
+          child.signalCode ?? null,
+        );
+      },
+      { once: true },
     );
 
     try {
@@ -336,7 +401,7 @@ export class AcpClient {
 
   async prompt(sessionId: string, text: string): Promise<PromptResponse> {
     const connection = this.getConnection();
-    return connection.prompt({
+    const promptPromise = connection.prompt({
       sessionId,
       prompt: [
         {
@@ -345,9 +410,69 @@ export class AcpClient {
         },
       ],
     });
+
+    this.activePrompt = {
+      sessionId,
+      promise: promptPromise,
+    };
+
+    try {
+      return await promptPromise;
+    } finally {
+      if (this.activePrompt?.promise === promptPromise) {
+        this.activePrompt = undefined;
+      }
+      this.cancellingSessionIds.delete(sessionId);
+    }
+  }
+
+  async cancel(sessionId: string): Promise<void> {
+    const connection = this.getConnection();
+    this.cancellingSessionIds.add(sessionId);
+    await connection.cancel({
+      sessionId,
+    });
+  }
+
+  async cancelActivePrompt(waitMs = 2_500): Promise<PromptResponse | undefined> {
+    const active = this.activePrompt;
+    if (!active) {
+      return undefined;
+    }
+
+    try {
+      await this.cancel(active.sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`failed to send session/cancel: ${message}`);
+    }
+
+    if (waitMs <= 0) {
+      return undefined;
+    }
+
+    let timer: NodeJS.Timeout | number | undefined;
+    const timeoutPromise = new Promise<undefined>((resolve) => {
+      timer = setTimeout(resolve, waitMs);
+    });
+
+    try {
+      return await Promise.race([
+        active.promise.then(
+          (response) => response,
+          () => undefined,
+        ),
+        timeoutPromise,
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     for (const terminalId of [...this.terminals.keys()]) {
       await this.releaseTerminalById(terminalId);
     }
@@ -360,6 +485,8 @@ export class AcpClient {
     this.observedSessionUpdates = 0;
     this.processedSessionUpdates = 0;
     this.suppressSessionUpdates = false;
+    this.activePrompt = undefined;
+    this.cancellingSessionIds.clear();
     this.connection = undefined;
     this.agent = undefined;
   }
@@ -381,6 +508,14 @@ export class AcpClient {
   private async handlePermissionRequest(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
+    if (this.cancellingSessionIds.has(params.sessionId)) {
+      return {
+        outcome: {
+          outcome: "cancelled",
+        },
+      };
+    }
+
     const response = await resolvePermissionRequest(
       params,
       this.options.permissionMode,
@@ -397,6 +532,44 @@ export class AcpClient {
     }
 
     return response;
+  }
+
+  private attachAgentLifecycleObservers(
+    child: ChildProcessByStdio<Writable, Readable, Readable>,
+  ): void {
+    child.once("exit", (exitCode, signal) => {
+      this.recordAgentExit("process_exit", exitCode, signal);
+    });
+
+    child.once("close", (exitCode, signal) => {
+      this.recordAgentExit("process_close", exitCode, signal);
+    });
+
+    child.stdout.once("close", () => {
+      this.recordAgentExit(
+        "pipe_close",
+        child.exitCode ?? null,
+        child.signalCode ?? null,
+      );
+    });
+  }
+
+  private recordAgentExit(
+    reason: AgentDisconnectReason,
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.lastAgentExit) {
+      return;
+    }
+
+    this.lastAgentExit = {
+      exitCode,
+      signal,
+      exitedAt: isoNow(),
+      reason,
+      unexpectedDuringPrompt: !this.closing && Boolean(this.activePrompt),
+    };
   }
 
   private async handleReadTextFile(

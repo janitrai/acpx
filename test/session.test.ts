@@ -25,6 +25,56 @@ test("SessionRecord allows optional closed and closedAt fields", () => {
   assert.equal(record.closedAt, undefined);
 });
 
+test("listSessions preserves stored turn history and lifecycle metadata", async () => {
+  await withTempHome(async (homeDir) => {
+    const session = await loadSessionModule();
+    const cwd = path.join(homeDir, "workspace");
+
+    await writeSessionRecord(
+      homeDir,
+      makeSessionRecord({
+        id: "history-meta",
+        sessionId: "history-meta",
+        agentCommand: "agent-a",
+        cwd,
+        pid: 12345,
+        agentStartedAt: "2026-01-01T00:00:00.000Z",
+        lastPromptAt: "2026-01-01T00:01:00.000Z",
+        lastAgentExitCode: null,
+        lastAgentExitSignal: "SIGTERM",
+        lastAgentExitAt: "2026-01-01T00:02:00.000Z",
+        lastAgentDisconnectReason: "process_exit",
+        turnHistory: [
+          {
+            role: "user",
+            timestamp: "2026-01-01T00:01:00.000Z",
+            textPreview: "hello",
+          },
+          {
+            role: "assistant",
+            timestamp: "2026-01-01T00:01:30.000Z",
+            textPreview: "world",
+          },
+        ],
+      }),
+    );
+
+    const sessions = await session.listSessions();
+    const record = sessions.find((entry) => entry.id === "history-meta");
+    assert.ok(record);
+    assert.equal(record.agentStartedAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(record.lastPromptAt, "2026-01-01T00:01:00.000Z");
+    assert.equal(record.lastAgentExitCode, null);
+    assert.equal(record.lastAgentExitSignal, "SIGTERM");
+    assert.equal(record.lastAgentExitAt, "2026-01-01T00:02:00.000Z");
+    assert.equal(record.lastAgentDisconnectReason, "process_exit");
+    assert.deepEqual(
+      record.turnHistory?.map((entry) => entry.textPreview),
+      ["hello", "world"],
+    );
+  });
+});
+
 test("findSession matches by agent/cwd and by agent/cwd/name", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();
@@ -413,6 +463,13 @@ function makeSessionRecord(overrides: Partial<SessionRecord>): SessionRecord {
     closed: overrides.closed ?? false,
     closedAt: overrides.closedAt,
     pid: overrides.pid,
+    agentStartedAt: overrides.agentStartedAt,
+    lastPromptAt: overrides.lastPromptAt,
+    lastAgentExitCode: overrides.lastAgentExitCode,
+    lastAgentExitSignal: overrides.lastAgentExitSignal,
+    lastAgentExitAt: overrides.lastAgentExitAt,
+    lastAgentDisconnectReason: overrides.lastAgentDisconnectReason,
+    turnHistory: overrides.turnHistory,
   };
 }
 

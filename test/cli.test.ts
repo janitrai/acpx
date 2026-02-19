@@ -44,7 +44,10 @@ test("formatPromptSessionBannerLine prints single-line prompt banner for matchin
   };
 
   const line = formatPromptSessionBannerLine(record, "/home/user/project");
-  assert.equal(line, "[acpx] session calm-forest (abc123) · /home/user/project");
+  assert.equal(
+    line,
+    "[acpx] session calm-forest (abc123) · /home/user/project · agent needs reconnect",
+  );
 });
 
 test("formatPromptSessionBannerLine includes routed-from path when cwd differs", () => {
@@ -62,7 +65,7 @@ test("formatPromptSessionBannerLine includes routed-from path when cwd differs",
   const line = formatPromptSessionBannerLine(record, "/home/user/project/src/auth");
   assert.equal(
     line,
-    "[acpx] session calm-forest (abc123) · /home/user/project (routed from ./src/auth)",
+    "[acpx] session calm-forest (abc123) · /home/user/project (routed from ./src/auth) · agent needs reconnect",
   );
 });
 
@@ -138,6 +141,183 @@ test("prompt exits with NO_SESSION when no session exists (no auto-create)", asy
   });
 });
 
+test("prompt reads from stdin when no prompt argument is provided", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(["--cwd", cwd, "codex"], homeDir, {
+      stdin: "fix the tests\n",
+    });
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+    assert.doesNotMatch(result.stderr, /Prompt is required/);
+  });
+});
+
+test("prompt reads from --file for persistent prompts", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.writeFile(path.join(cwd, "prompt.md"), "fix the tests\n", "utf8");
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "--file", "prompt.md"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+    assert.doesNotMatch(result.stderr, /Prompt is required/);
+  });
+});
+
+test("prompt supports --file - with additional argument text", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "--file", "-", "additional context"],
+      homeDir,
+      { stdin: "from stdin\n" },
+    );
+
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /No acpx session found/);
+    assert.doesNotMatch(result.stderr, /Prompt is required/);
+  });
+});
+
+test("sessions history prints stored history entries", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    await writeSessionRecord(homeDir, {
+      id: "history-session",
+      sessionId: "history-session",
+      agentCommand: "npx @zed-industries/codex-acp",
+      cwd,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:10:00.000Z",
+      closed: false,
+      turnHistory: [
+        {
+          role: "user",
+          timestamp: "2026-01-01T00:01:00.000Z",
+          textPreview: "first message",
+        },
+        {
+          role: "assistant",
+          timestamp: "2026-01-01T00:02:00.000Z",
+          textPreview: "second message",
+        },
+      ],
+    });
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "sessions", "history", "--limit", "1"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /second message/);
+    assert.doesNotMatch(result.stdout, /first message/);
+  });
+});
+
+test("status reports running process when session pid is alive", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      stdio: "ignore",
+    });
+
+    try {
+      await writeSessionRecord(homeDir, {
+        id: "status-live",
+        sessionId: "status-live",
+        agentCommand: "npx @zed-industries/codex-acp",
+        cwd,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        lastUsedAt: "2026-01-01T00:00:00.000Z",
+        lastPromptAt: "2026-01-01T00:00:00.000Z",
+        closed: false,
+        pid: child.pid,
+        agentStartedAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      const result = await runCli(["--cwd", cwd, "codex", "status"], homeDir);
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /status: running/);
+    } finally {
+      if (child.pid && child.exitCode == null && child.signalCode == null) {
+        child.kill("SIGKILL");
+      }
+    }
+  });
+});
+
+test("config defaults are loaded from global and project config files", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    const xdgConfigHome = path.join(homeDir, "xdg");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(xdgConfigHome, "acpx"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(xdgConfigHome, "acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          defaultAgent: "codex",
+          format: "json",
+          agents: {
+            "my-custom": { command: "custom-global" },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(cwd, ".acpxrc.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            "my-custom": { command: "custom-project" },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await writeSessionRecord(homeDir, {
+      id: "custom-config-session",
+      sessionId: "custom-config-session",
+      agentCommand: "custom-project",
+      cwd,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(["--cwd", cwd, "my-custom", "sessions"], homeDir, {
+      xdgConfigHome,
+    });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.doesNotThrow(() => JSON.parse(result.stdout.trim()));
+    assert.match(result.stdout, /custom-config-session/);
+  });
+});
+
 async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<void> {
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-cli-test-home-"));
   try {
@@ -147,14 +327,26 @@ async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<vo
   }
 }
 
-async function runCli(args: string[], homeDir: string): Promise<CliRunResult> {
+type CliRunOptions = {
+  stdin?: string;
+  xdgConfigHome?: string;
+  cwd?: string;
+};
+
+async function runCli(
+  args: string[],
+  homeDir: string,
+  options: CliRunOptions = {},
+): Promise<CliRunResult> {
   return await new Promise<CliRunResult>((resolve) => {
     const child = spawn(process.execPath, [CLI_PATH, ...args], {
       env: {
         ...process.env,
         HOME: homeDir,
+        ...(options.xdgConfigHome ? { XDG_CONFIG_HOME: options.xdgConfigHome } : {}),
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      cwd: options.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let stdout = "";
@@ -169,6 +361,12 @@ async function runCli(args: string[], homeDir: string): Promise<CliRunResult> {
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
+
+    if (options.stdin != null) {
+      child.stdin.end(options.stdin);
+    } else {
+      child.stdin.end();
+    }
 
     child.once("close", (code) => {
       resolve({ code, stdout, stderr });

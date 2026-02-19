@@ -81,6 +81,14 @@ export type AcpClientOptions = {
   onSessionUpdate?: (notification: SessionNotification) => void;
 };
 
+export type SessionHistoryRole = "user" | "assistant";
+
+export type SessionHistoryEntry = {
+  role: SessionHistoryRole;
+  timestamp: string;
+  textPreview: string;
+};
+
 export type SessionRecord = {
   id: string;
   sessionId: string;
@@ -92,6 +100,13 @@ export type SessionRecord = {
   closed?: boolean;
   closedAt?: string;
   pid?: number;
+  agentStartedAt?: string;
+  lastPromptAt?: string;
+  lastAgentExitCode?: number | null;
+  lastAgentExitSignal?: NodeJS.Signals | null;
+  lastAgentExitAt?: string;
+  lastAgentDisconnectReason?: string;
+  turnHistory?: SessionHistoryEntry[];
   protocolVersion?: number;
   agentCapabilities?: AgentCapabilities;
 };

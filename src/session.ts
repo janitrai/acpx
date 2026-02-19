@@ -1,14 +1,19 @@
-import type { SessionNotification, StopReason } from "@agentclientprotocol/sdk";
+import type {
+  ContentBlock,
+  SessionNotification,
+  StopReason,
+} from "@agentclientprotocol/sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { AcpClient } from "./client.js";
+import { AcpClient, type AgentLifecycleSnapshot } from "./client.js";
 import type {
   OutputFormatter,
   PermissionMode,
+  SessionHistoryEntry,
   SessionEnqueueResult,
   SessionSendOutcome,
   RunPromptResult,
@@ -23,6 +28,10 @@ const PROCESS_POLL_MS = 50;
 const QUEUE_CONNECT_ATTEMPTS = 40;
 const QUEUE_CONNECT_RETRY_MS = 50;
 export const DEFAULT_QUEUE_OWNER_TTL_MS = 300_000;
+const INTERRUPT_CANCEL_WAIT_MS = 2_500;
+const SESSION_HISTORY_MAX_ENTRIES = 500;
+const SESSION_HISTORY_PREVIEW_CHARS = 220;
+export const DEFAULT_HISTORY_LIMIT = 20;
 
 export class TimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -168,6 +177,53 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
       : typeof record.closedAt === "string"
         ? record.closedAt
         : null;
+  const agentStartedAt =
+    record.agentStartedAt == null
+      ? undefined
+      : typeof record.agentStartedAt === "string"
+        ? record.agentStartedAt
+        : null;
+  const lastPromptAt =
+    record.lastPromptAt == null
+      ? undefined
+      : typeof record.lastPromptAt === "string"
+        ? record.lastPromptAt
+        : null;
+  const rawLastAgentExitCode = (record as { lastAgentExitCode?: unknown })
+    .lastAgentExitCode;
+  const lastAgentExitCode =
+    rawLastAgentExitCode === undefined
+      ? undefined
+      : rawLastAgentExitCode === null
+        ? null
+        : Number.isInteger(rawLastAgentExitCode)
+          ? (rawLastAgentExitCode as number)
+          : Symbol("invalid");
+  const rawLastAgentExitSignal = (record as { lastAgentExitSignal?: unknown })
+    .lastAgentExitSignal;
+  const lastAgentExitSignal =
+    rawLastAgentExitSignal === undefined
+      ? undefined
+      : rawLastAgentExitSignal === null
+        ? null
+        : typeof rawLastAgentExitSignal === "string"
+          ? rawLastAgentExitSignal
+          : Symbol("invalid");
+  const lastAgentExitAt =
+    record.lastAgentExitAt == null
+      ? undefined
+      : typeof record.lastAgentExitAt === "string"
+        ? record.lastAgentExitAt
+        : null;
+  const lastAgentDisconnectReason =
+    record.lastAgentDisconnectReason == null
+      ? undefined
+      : typeof record.lastAgentDisconnectReason === "string"
+        ? record.lastAgentDisconnectReason
+        : null;
+  const turnHistory = parseHistoryEntries(
+    (record as { turnHistory?: unknown }).turnHistory,
+  );
 
   if (
     typeof record.id !== "string" ||
@@ -179,7 +235,14 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     typeof record.lastUsedAt !== "string" ||
     pid === null ||
     closed === null ||
-    closedAt === null
+    closedAt === null ||
+    agentStartedAt === null ||
+    lastPromptAt === null ||
+    typeof lastAgentExitCode === "symbol" ||
+    typeof lastAgentExitSignal === "symbol" ||
+    lastAgentExitAt === null ||
+    lastAgentDisconnectReason === null ||
+    turnHistory === null
   ) {
     return null;
   }
@@ -196,7 +259,54 @@ function parseSessionRecord(raw: unknown): SessionRecord | null {
     closed,
     closedAt,
     pid,
+    agentStartedAt,
+    lastPromptAt,
+    lastAgentExitCode,
+    lastAgentExitSignal:
+      lastAgentExitSignal == null
+        ? lastAgentExitSignal
+        : (lastAgentExitSignal as NodeJS.Signals),
+    lastAgentExitAt,
+    lastAgentDisconnectReason,
+    turnHistory,
   };
+}
+
+function parseHistoryEntries(raw: unknown): SessionHistoryEntry[] | undefined | null {
+  if (raw == null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+
+  const entries: SessionHistoryEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      return null;
+    }
+
+    const role = (item as { role?: unknown }).role;
+    const timestamp = (item as { timestamp?: unknown }).timestamp;
+    const textPreview = (item as { textPreview?: unknown }).textPreview;
+
+    if (
+      (role !== "user" && role !== "assistant") ||
+      typeof timestamp !== "string" ||
+      typeof textPreview !== "string"
+    ) {
+      return null;
+    }
+
+    entries.push({
+      role,
+      timestamp,
+      textPreview,
+    });
+  }
+
+  return entries;
 }
 
 async function writeSessionRecord(record: SessionRecord): Promise<void> {
@@ -348,6 +458,105 @@ function formatError(error: unknown): string {
   return String(error);
 }
 
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function toPreviewText(value: string): string {
+  const collapsed = collapseWhitespace(value);
+  if (collapsed.length <= SESSION_HISTORY_PREVIEW_CHARS) {
+    return collapsed;
+  }
+  if (SESSION_HISTORY_PREVIEW_CHARS <= 3) {
+    return collapsed.slice(0, SESSION_HISTORY_PREVIEW_CHARS);
+  }
+  return `${collapsed.slice(0, SESSION_HISTORY_PREVIEW_CHARS - 3)}...`;
+}
+
+function textFromContent(content: ContentBlock): string | undefined {
+  if (content.type === "text") {
+    return content.text;
+  }
+  if (content.type === "resource_link") {
+    return content.title ?? content.name ?? content.uri;
+  }
+  if (content.type === "resource") {
+    if ("text" in content.resource && typeof content.resource.text === "string") {
+      return content.resource.text;
+    }
+    return content.resource.uri;
+  }
+  return undefined;
+}
+
+function toHistoryEntryFromUpdate(
+  notification: SessionNotification,
+): SessionHistoryEntry | undefined {
+  const update = notification.update;
+  if (
+    update.sessionUpdate !== "user_message_chunk" &&
+    update.sessionUpdate !== "agent_message_chunk"
+  ) {
+    return undefined;
+  }
+
+  const text = textFromContent(update.content);
+  if (!text) {
+    return undefined;
+  }
+
+  const textPreview = toPreviewText(text);
+  if (!textPreview) {
+    return undefined;
+  }
+
+  return {
+    role: update.sessionUpdate === "user_message_chunk" ? "user" : "assistant",
+    timestamp: isoNow(),
+    textPreview,
+  };
+}
+
+function appendHistoryEntries(
+  current: SessionHistoryEntry[] | undefined,
+  entries: SessionHistoryEntry[],
+): SessionHistoryEntry[] {
+  const base = current ? [...current] : [];
+  for (const entry of entries) {
+    if (!entry.textPreview.trim()) {
+      continue;
+    }
+    base.push(entry);
+  }
+
+  if (base.length <= SESSION_HISTORY_MAX_ENTRIES) {
+    return base;
+  }
+
+  return base.slice(base.length - SESSION_HISTORY_MAX_ENTRIES);
+}
+
+function applyLifecycleSnapshotToRecord(
+  record: SessionRecord,
+  snapshot: AgentLifecycleSnapshot,
+): void {
+  record.pid = snapshot.pid;
+  record.agentStartedAt = snapshot.startedAt;
+
+  if (snapshot.lastExit) {
+    record.lastAgentExitCode = snapshot.lastExit.exitCode;
+    record.lastAgentExitSignal = snapshot.lastExit.signal;
+    record.lastAgentExitAt = snapshot.lastExit.exitedAt;
+    record.lastAgentDisconnectReason = snapshot.lastExit.reason;
+    return;
+  }
+
+  record.lastAgentExitCode = undefined;
+  record.lastAgentExitSignal = undefined;
+  record.lastAgentExitAt = undefined;
+  record.lastAgentDisconnectReason = undefined;
+}
+
 function shouldFallbackToNewSession(error: unknown): boolean {
   if (error instanceof TimeoutError || error instanceof InterruptedError) {
     return false;
@@ -371,7 +580,7 @@ function shouldFallbackToNewSession(error: unknown): boolean {
   return code === -32001 || code === -32002;
 }
 
-function isProcessAlive(pid: number | undefined): boolean {
+export function isProcessAlive(pid: number | undefined): boolean {
   if (!pid || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
     return false;
   }
@@ -1393,26 +1602,45 @@ async function runSessionPrompt(
   const output = options.outputFormatter;
   const record = await resolveSessionRecord(options.sessionRecordId);
   const storedProcessAlive = isProcessAlive(record.pid);
+  const shouldReconnect = Boolean(record.pid) && !storedProcessAlive;
 
-  if (storedProcessAlive && options.verbose) {
-    process.stderr.write(
-      `[acpx] saved session pid ${record.pid} is running; reconnecting with loadSession\n`,
-    );
+  if (options.verbose) {
+    if (storedProcessAlive) {
+      process.stderr.write(
+        `[acpx] saved session pid ${record.pid} is running; reconnecting with loadSession\n`,
+      );
+    } else if (shouldReconnect) {
+      process.stderr.write(
+        `[acpx] saved session pid ${record.pid} is dead; respawning agent and attempting session/load\n`,
+      );
+    }
   }
+
+  const assistantSnippets: string[] = [];
 
   const client = new AcpClient({
     agentCommand: record.agentCommand,
     cwd: absolutePath(record.cwd),
     permissionMode: options.permissionMode,
     verbose: options.verbose,
-    onSessionUpdate: (notification) => output.onSessionUpdate(notification),
+    onSessionUpdate: (notification) => {
+      output.onSessionUpdate(notification);
+      const entry = toHistoryEntryFromUpdate(notification);
+      if (entry && entry.role === "assistant") {
+        assistantSnippets.push(entry.textPreview);
+      }
+    },
   });
 
   try {
     return await withInterrupt(
       async () => {
         await withTimeout(client.start(), options.timeoutMs);
-        record.pid = client.getAgentPid();
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+        record.closed = false;
+        record.closedAt = undefined;
+        record.lastPromptAt = isoNow();
+        await writeSessionRecord(record);
 
         let resumed = false;
         let loadError: string | undefined;
@@ -1446,19 +1674,55 @@ async function runSessionPrompt(
           record.sessionId = activeSessionId;
         }
 
-        const response = await withTimeout(
-          client.prompt(activeSessionId, options.message),
-          options.timeoutMs,
-        );
+        let response;
+        try {
+          response = await withTimeout(
+            client.prompt(activeSessionId, options.message),
+            options.timeoutMs,
+          );
+        } catch (error) {
+          const snapshot = client.getAgentLifecycleSnapshot();
+          applyLifecycleSnapshotToRecord(record, snapshot);
+          if (snapshot.lastExit?.unexpectedDuringPrompt && options.verbose) {
+            process.stderr.write(
+              `[acpx] agent disconnected during prompt (${snapshot.lastExit.reason}, exit=${snapshot.lastExit.exitCode}, signal=${snapshot.lastExit.signal ?? "none"})\n`,
+            );
+          }
+          record.lastUsedAt = isoNow();
+          await writeSessionRecord(record);
+          throw error;
+        }
 
         output.onDone(response.stopReason);
         output.flush();
 
-        record.lastUsedAt = isoNow();
+        const now = isoNow();
+        const turnEntries: SessionHistoryEntry[] = [];
+        const userPreview = toPreviewText(options.message);
+        if (userPreview) {
+          turnEntries.push({
+            role: "user",
+            timestamp: record.lastPromptAt ?? now,
+            textPreview: userPreview,
+          });
+        }
+
+        const assistantPreview = toPreviewText(assistantSnippets.join(" "));
+        if (assistantPreview) {
+          turnEntries.push({
+            role: "assistant",
+            timestamp: now,
+            textPreview: assistantPreview,
+          });
+        }
+
+        record.turnHistory = appendHistoryEntries(record.turnHistory, turnEntries);
+        record.lastUsedAt = now;
         record.closed = false;
         record.closedAt = undefined;
         record.protocolVersion = client.initializeResult?.protocolVersion;
         record.agentCapabilities = client.initializeResult?.agentCapabilities;
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
         await writeSessionRecord(record);
 
         return {
@@ -1469,11 +1733,21 @@ async function runSessionPrompt(
         };
       },
       async () => {
+        await client.cancelActivePrompt(INTERRUPT_CANCEL_WAIT_MS);
+        applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+        record.lastUsedAt = isoNow();
+        await writeSessionRecord(record).catch(() => {
+          // best effort while process is being interrupted
+        });
         await client.close();
       },
     );
   } finally {
     await client.close();
+    applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+    await writeSessionRecord(record).catch(() => {
+      // best effort on close
+    });
   }
 }
 
@@ -1504,6 +1778,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
         return toPromptResult(response.stopReason, sessionId, client);
       },
       async () => {
+        await client.cancelActivePrompt(INTERRUPT_CANCEL_WAIT_MS);
         await client.close();
       },
     );
@@ -1530,6 +1805,7 @@ export async function createSession(
           client.createSession(absolutePath(options.cwd)),
           options.timeoutMs,
         );
+        const lifecycle = client.getAgentLifecycleSnapshot();
 
         const now = isoNow();
         const record: SessionRecord = {
@@ -1542,9 +1818,11 @@ export async function createSession(
           lastUsedAt: now,
           closed: false,
           closedAt: undefined,
-          pid: client.getAgentPid(),
+          pid: lifecycle.pid,
+          agentStartedAt: lifecycle.startedAt,
           protocolVersion: client.initializeResult?.protocolVersion,
           agentCapabilities: client.initializeResult?.agentCapabilities,
+          turnHistory: [],
         };
 
         await writeSessionRecord(record);

@@ -12,6 +12,12 @@ One command surface for Codex, Claude, Gemini, OpenCode, Pi, or custom ACP serve
 - **Soft-close lifecycle**: close sessions without deleting history from disk
 - **Queue owner TTL**: keep queue owners alive briefly for follow-up prompts (`--ttl`)
 - **Fire-and-forget**: `--no-wait` queues a prompt and returns immediately
+- **Graceful cancel**: `Ctrl+C` sends ACP `session/cancel` before force-kill fallback
+- **Crash reconnect**: dead agent processes are detected and sessions are reloaded automatically
+- **Prompt from file/stdin**: `--file <path>` or piped stdin for prompt content
+- **Config files**: global + project JSON config with `acpx config show|init`
+- **Session inspect/history**: `sessions show` and `sessions history --limit <n>`
+- **Local status checks**: `status` reports running/dead/no-session, pid, uptime, last prompt
 - **Structured output**: typed ACP messages (thinking, tool calls, diffs) instead of ANSI scraping
 - **Any ACP agent**: built-in registry + `--agent` escape hatch for custom servers
 - **One-shot mode**: `exec` for stateless fire-and-forget tasks
@@ -108,6 +114,9 @@ The only prerequisite is the underlying coding agent you want to use:
 acpx codex sessions new                        # create a session (explicit) for this project dir
 acpx codex 'fix the tests'                     # implicit prompt (routes via directory-walk)
 acpx codex prompt 'fix the tests'              # explicit prompt subcommand
+echo 'fix flaky tests' | acpx codex            # prompt from stdin
+acpx codex --file prompt.md                    # prompt from file
+acpx codex --file - "extra context"            # explicit stdin + appended args
 acpx codex --no-wait 'draft test migration plan' # enqueue without waiting if session is busy
 acpx exec 'summarize this repo'                # default agent shortcut (codex)
 acpx codex exec 'what does this repo do?'      # one-shot, no saved session
@@ -119,10 +128,16 @@ acpx codex -s docs 'rewrite API docs'           # parallel work in another named
 
 acpx codex sessions              # list sessions for codex command
 acpx codex sessions list         # explicit list
+acpx codex sessions show         # inspect cwd session metadata
+acpx codex sessions history      # show recent turn history
 acpx codex sessions new          # create fresh cwd-scoped default session
 acpx codex sessions new --name api # create fresh named session
 acpx codex sessions close        # close cwd-scoped default session
 acpx codex sessions close api    # close cwd-scoped named session
+acpx codex status                # local process status for current session
+
+acpx config show                 # show resolved config (global + project)
+acpx config init                 # create ~/.config/acpx/config.json template
 
 acpx claude 'refactor auth middleware' # built-in claude agent
 acpx gemini 'add startup logging'      # built-in gemini agent
@@ -159,6 +174,32 @@ acpx --timeout 90 codex 'investigate intermittent test timeout'
 acpx --ttl 30 codex 'keep queue owner alive for quick follow-ups'
 acpx --verbose codex 'debug why adapter startup is failing'
 ```
+
+## Configuration files
+
+`acpx` reads config in this order (later wins):
+
+1. global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+2. project: `<cwd>/.acpxrc.json`
+
+CLI flags always win over config values.
+
+Supported keys:
+
+```json
+{
+  "defaultAgent": "codex",
+  "defaultPermissions": "approve-all",
+  "ttl": 300,
+  "timeout": null,
+  "format": "text",
+  "agents": {
+    "my-custom": { "command": "./bin/my-acp-server" }
+  }
+}
+```
+
+Use `acpx config show` to inspect the resolved result and `acpx config init` to create the global template.
 
 ## Output formats
 
@@ -206,6 +247,9 @@ acpx --agent ./my-custom-acp-server 'do something'
 - `--no-wait` submits to that queue and returns immediately.
 - `exec` is always one-shot and does not reuse saved sessions.
 - Session metadata is stored under `~/.acpx/sessions/`.
+- Each successful prompt appends lightweight turn history previews (`role`, `timestamp`, `textPreview`) to session metadata.
+- `Ctrl+C` during a running turn sends ACP `session/cancel` and waits briefly for `stopReason=cancelled` before force-killing if needed.
+- If a saved session pid is dead on the next prompt, `acpx` respawns the agent, attempts `session/load`, and transparently falls back to `session/new` if loading fails.
 
 ## Full CLI reference
 

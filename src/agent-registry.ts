@@ -12,11 +12,33 @@ export function normalizeAgentName(value: string): string {
   return value.trim().toLowerCase();
 }
 
-export function resolveAgentCommand(agentName: string): string {
-  const normalized = normalizeAgentName(agentName);
-  return AGENT_REGISTRY[normalized] ?? agentName;
+export function mergeAgentRegistry(
+  overrides?: Record<string, string>,
+): Record<string, string> {
+  if (!overrides) {
+    return { ...AGENT_REGISTRY };
+  }
+
+  const merged = { ...AGENT_REGISTRY };
+  for (const [name, command] of Object.entries(overrides)) {
+    const normalized = normalizeAgentName(name);
+    if (!normalized || !command.trim()) {
+      continue;
+    }
+    merged[normalized] = command.trim();
+  }
+  return merged;
 }
 
-export function listBuiltInAgents(): string[] {
-  return Object.keys(AGENT_REGISTRY);
+export function resolveAgentCommand(
+  agentName: string,
+  overrides?: Record<string, string>,
+): string {
+  const normalized = normalizeAgentName(agentName);
+  const registry = mergeAgentRegistry(overrides);
+  return registry[normalized] ?? agentName;
+}
+
+export function listBuiltInAgents(overrides?: Record<string, string>): string[] {
+  return Object.keys(mergeAgentRegistry(overrides));
 }

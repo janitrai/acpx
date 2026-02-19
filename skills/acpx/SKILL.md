@@ -19,6 +19,12 @@ Core capabilities:
 - One-shot execution mode (`exec`)
 - Named parallel sessions (`-s/--session`)
 - Queue-aware prompt submission with optional fire-and-forget (`--no-wait`)
+- Graceful cancellation via ACP `session/cancel` on interrupt
+- Agent reconnect/resume after dead subprocess detection
+- Prompt input via stdin or `--file`
+- Config files with global+project merge and `config show|init`
+- Session metadata/history inspection (`sessions show`, `sessions history`)
+- Local agent process checks via `status`
 - Structured streaming output (`text`, `json`, `quiet`)
 - Built-in agent registry plus raw `--agent` escape hatch
 
@@ -37,13 +43,16 @@ For normal session reuse, prefer a global install over `npx`.
 ```bash
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
-acpx [global_options] exec [prompt_text...]
-acpx [global_options] sessions [list | new [--name <name>] | close [name]]
+acpx [global_options] exec [prompt_options] [prompt_text...]
+acpx [global_options] status [-s <name>]
+acpx [global_options] sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
+acpx [global_options] config [show | init]
 
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
-acpx [global_options] <agent> exec [prompt_text...]
-acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name]]
+acpx [global_options] <agent> exec [prompt_options] [prompt_text...]
+acpx [global_options] <agent> status [-s <name>]
+acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 ```
 
 If prompt text is omitted and stdin is piped, `acpx` reads prompt text from stdin.
@@ -86,13 +95,15 @@ Behavior:
 
 - Uses a saved session for the session scope key
 - Auto-resumes prior session when one exists for that scope
-- Creates a new session record when none exists
+- If no session exists for the scope, exits with `NO_SESSION` and prompts for `sessions new`
 - Is queue-aware when another prompt is already running for the same session
+- On interrupt during an active turn, sends ACP `session/cancel` before force-kill fallback
 
 Prompt options:
 
 - `-s, --session <name>`: use a named session within the same cwd
 - `--no-wait`: enqueue and return immediately when session is already busy
+- `-f, --file <path>`: read prompt text from file (`-` means stdin)
 
 ### Exec (one-shot)
 
@@ -115,10 +126,16 @@ acpx sessions new
 acpx sessions new --name backend
 acpx sessions close
 acpx sessions close backend
+acpx sessions show
+acpx sessions history --limit 20
+acpx status
 
 acpx codex sessions
 acpx codex sessions new --name backend
 acpx codex sessions close backend
+acpx codex sessions show backend
+acpx codex sessions history backend --limit 20
+acpx codex status
 ```
 
 Behavior:
@@ -129,6 +146,8 @@ Behavior:
 - when `new` replaces an existing open session in that scope, the old one is soft-closed
 - `close` targets current cwd default session
 - `close <name>` targets current cwd named session
+- `show [name]` prints stored metadata for that scoped session
+- `history [name]` prints stored turn history previews (default 20, use `--limit`)
 
 ## Global options
 
@@ -143,6 +162,24 @@ Behavior:
 - `--verbose`: verbose ACP/debug logs to stderr
 
 Permission flags are mutually exclusive.
+
+## Config files
+
+Config files are merged in this order (later wins):
+
+- global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+- project: `<cwd>/.acpxrc.json`
+
+Supported keys:
+
+- `defaultAgent`
+- `defaultPermissions` (`approve-all`, `approve-reads`, `deny-all`)
+- `ttl` (seconds)
+- `timeout` (seconds or `null`)
+- `format` (`text`, `json`, `quiet`)
+- `agents` map (`name -> { command }`)
+
+Use `acpx config show` to inspect the resolved config and `acpx config init` to create the global template.
 
 ## Session behavior
 
@@ -165,6 +202,8 @@ Resume behavior:
 - Prompt mode attempts to reconnect to saved session.
 - If adapter-side session is invalid/not found, `acpx` creates a fresh session and updates the saved record.
 - explicitly selected session records can still be resumed via `loadSession` even if previously closed.
+- dead saved PIDs are detected and reconnected on the next prompt.
+- each completed prompt stores lightweight turn history previews in the session record.
 
 ## Prompt queueing and `--no-wait`
 
@@ -181,6 +220,7 @@ Submission behavior:
 
 - Default: enqueue and wait for queued prompt completion, streaming updates back.
 - `--no-wait`: enqueue and return after queue acknowledgement.
+- `Ctrl+C` during an active turn sends ACP `session/cancel`, waits briefly, then force-kills only if cancellation does not finish in time.
 
 ## Output formats
 

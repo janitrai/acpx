@@ -2,6 +2,7 @@
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
 import { realpathSync } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { findSkillsRoot, maybeHandleSkillflag } from "skillflag";
@@ -10,8 +11,15 @@ import {
   listBuiltInAgents,
   resolveAgentCommand as resolveAgentCommandFromRegistry,
 } from "./agent-registry.js";
+import {
+  initGlobalConfigFile,
+  loadResolvedConfig,
+  toConfigDisplay,
+  type ResolvedAcpxConfig,
+} from "./config.js";
 import { createOutputFormatter } from "./output.js";
 import {
+  DEFAULT_HISTORY_LIMIT,
   DEFAULT_QUEUE_OWNER_TTL_MS,
   InterruptedError,
   TimeoutError,
@@ -20,6 +28,7 @@ import {
   findGitRepositoryRoot,
   findSession,
   findSessionByDirectoryWalk,
+  isProcessAlive,
   listSessionsForAgent,
   runOnce,
   sendSession,
@@ -57,13 +66,33 @@ type GlobalFlags = PermissionFlags & {
 type PromptFlags = {
   session?: string;
   wait?: boolean;
+  file?: string;
+};
+
+type ExecFlags = {
+  file?: string;
 };
 
 type SessionsNewFlags = {
   name?: string;
 };
 
-const TOP_LEVEL_VERBS = new Set(["prompt", "exec", "sessions", "help"]);
+type SessionsHistoryFlags = {
+  limit: number;
+};
+
+type StatusFlags = {
+  session?: string;
+};
+
+const TOP_LEVEL_VERBS = new Set([
+  "prompt",
+  "exec",
+  "sessions",
+  "status",
+  "config",
+  "help",
+]);
 
 function parseOutputFormat(value: string): OutputFormat {
   if (!OUTPUT_FORMATS.includes(value as OutputFormat)) {
@@ -98,7 +127,18 @@ function parseSessionName(value: string): string {
   return trimmed;
 }
 
-function resolvePermissionMode(flags: PermissionFlags): PermissionMode {
+function parseHistoryLimit(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new InvalidArgumentError("Limit must be a positive integer");
+  }
+  return parsed;
+}
+
+function resolvePermissionMode(
+  flags: PermissionFlags,
+  defaultMode: PermissionMode,
+): PermissionMode {
   const selected = [flags.approveAll, flags.approveReads, flags.denyAll].filter(
     Boolean,
   ).length;
@@ -116,10 +156,37 @@ function resolvePermissionMode(flags: PermissionFlags): PermissionMode {
     return "deny-all";
   }
 
-  return "approve-reads";
+  return defaultMode;
 }
 
-async function readPrompt(promptParts: string[]): Promise<string> {
+async function readPromptInputFromStdin(): Promise<string> {
+  let data = "";
+  for await (const chunk of process.stdin) {
+    data += String(chunk);
+  }
+  return data;
+}
+
+async function readPrompt(
+  promptParts: string[],
+  filePath: string | undefined,
+  cwd: string,
+): Promise<string> {
+  if (filePath) {
+    const source =
+      filePath === "-"
+        ? await readPromptInputFromStdin()
+        : await fs.readFile(path.resolve(cwd, filePath), "utf8");
+    const pieces = [source.trim(), promptParts.join(" ").trim()].filter(
+      (value) => value.length > 0,
+    );
+    const prompt = pieces.join("\n\n").trim();
+    if (!prompt) {
+      throw new InvalidArgumentError("Prompt from --file is empty");
+    }
+    return prompt;
+  }
+
   const joined = promptParts.join(" ").trim();
   if (joined.length > 0) {
     return joined;
@@ -127,16 +194,11 @@ async function readPrompt(promptParts: string[]): Promise<string> {
 
   if (process.stdin.isTTY) {
     throw new InvalidArgumentError(
-      "Prompt is required (pass as argument or pipe via stdin)",
+      "Prompt is required (pass as argument, --file, or pipe via stdin)",
     );
   }
 
-  let data = "";
-  for await (const chunk of process.stdin) {
-    data += String(chunk);
-  }
-
-  const prompt = data.trim();
+  const prompt = (await readPromptInputFromStdin()).trim();
   if (!prompt) {
     throw new InvalidArgumentError("Prompt from stdin is empty");
   }
@@ -170,12 +232,7 @@ function addGlobalFlags(command: Command): Command {
       "Auto-approve read/search requests and prompt for writes",
     )
     .option("--deny-all", "Deny all permission requests")
-    .option(
-      "--format <fmt>",
-      "Output format: text, json, quiet",
-      parseOutputFormat,
-      "text",
-    )
+    .option("--format <fmt>", "Output format: text, json, quiet", parseOutputFormat)
     .option(
       "--timeout <seconds>",
       "Maximum time to wait for agent response",
@@ -202,24 +259,40 @@ function addSessionOption(command: Command): Command {
     );
 }
 
-function resolveGlobalFlags(command: Command): GlobalFlags {
+function addSessionNameOption(command: Command): Command {
+  return command.option(
+    "-s, --session <name>",
+    "Use named session instead of cwd default",
+    parseSessionName,
+  );
+}
+
+function addPromptInputOption(command: Command): Command {
+  return command.option(
+    "-f, --file <path>",
+    "Read prompt text from file path (use - for stdin)",
+  );
+}
+
+function resolveGlobalFlags(command: Command, config: ResolvedAcpxConfig): GlobalFlags {
   const opts = command.optsWithGlobals() as Partial<GlobalFlags>;
   return {
     agent: opts.agent,
     cwd: opts.cwd ?? process.cwd(),
-    timeout: opts.timeout,
-    ttl: opts.ttl ?? DEFAULT_QUEUE_OWNER_TTL_MS,
-    verbose: opts.verbose,
-    format: opts.format ?? "text",
-    approveAll: opts.approveAll,
-    approveReads: opts.approveReads,
-    denyAll: opts.denyAll,
+    timeout: opts.timeout ?? config.timeoutMs,
+    ttl: opts.ttl ?? config.ttlMs ?? DEFAULT_QUEUE_OWNER_TTL_MS,
+    verbose: opts.verbose === true,
+    format: opts.format ?? config.format ?? "text",
+    approveAll: opts.approveAll ? true : undefined,
+    approveReads: opts.approveReads ? true : undefined,
+    denyAll: opts.denyAll ? true : undefined,
   };
 }
 
 function resolveAgentInvocation(
   explicitAgentName: string | undefined,
   globalFlags: GlobalFlags,
+  config: ResolvedAcpxConfig,
 ): {
   agentName: string;
   agentCommand: string;
@@ -232,11 +305,11 @@ function resolveAgentInvocation(
     );
   }
 
-  const agentName = explicitAgentName ?? DEFAULT_AGENT_NAME;
+  const agentName = explicitAgentName ?? config.defaultAgent ?? DEFAULT_AGENT_NAME;
   const agentCommand =
     override && override.length > 0
       ? override
-      : resolveAgentCommandFromRegistry(agentName);
+      : resolveAgentCommandFromRegistry(agentName, config.agents);
 
   return {
     agentName,
@@ -360,6 +433,12 @@ function formatRoutedFrom(sessionCwd: string, currentCwd: string): string | unde
   return relative.startsWith(".") ? relative : `.${path.sep}${relative}`;
 }
 
+function sessionConnectionStatus(
+  record: SessionRecord,
+): "connected" | "needs reconnect" {
+  return isProcessAlive(record.pid) ? "connected" : "needs reconnect";
+}
+
 export function formatPromptSessionBannerLine(
   record: SessionRecord,
   currentCwd: string,
@@ -371,12 +450,13 @@ export function formatPromptSessionBannerLine(
     normalizedSessionCwd === normalizedCurrentCwd
       ? undefined
       : formatRoutedFrom(normalizedSessionCwd, normalizedCurrentCwd);
+  const status = sessionConnectionStatus(record);
 
   if (routedFrom) {
-    return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd} (routed from ${routedFrom})`;
+    return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd} (routed from ${routedFrom}) · agent ${status}`;
   }
 
-  return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd}`;
+  return `[acpx] session ${label} (${record.id}) · ${normalizedSessionCwd} · agent ${status}`;
 }
 
 function printPromptSessionBanner(
@@ -411,12 +491,13 @@ async function handlePrompt(
   promptParts: string[],
   flags: PromptFlags,
   command: Command,
+  config: ResolvedAcpxConfig,
 ): Promise<void> {
-  const globalFlags = resolveGlobalFlags(command);
-  const permissionMode = resolvePermissionMode(globalFlags);
-  const prompt = await readPrompt(promptParts);
+  const globalFlags = resolveGlobalFlags(command, config);
+  const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
+  const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
   const outputFormatter = createOutputFormatter(globalFlags.format);
-  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
   const gitRoot = findGitRepositoryRoot(agent.cwd);
   const walkBoundary = gitRoot ?? agent.cwd;
 
@@ -466,13 +547,15 @@ async function handlePrompt(
 async function handleExec(
   explicitAgentName: string | undefined,
   promptParts: string[],
+  flags: ExecFlags,
   command: Command,
+  config: ResolvedAcpxConfig,
 ): Promise<void> {
-  const globalFlags = resolveGlobalFlags(command);
-  const permissionMode = resolvePermissionMode(globalFlags);
-  const prompt = await readPrompt(promptParts);
+  const globalFlags = resolveGlobalFlags(command, config);
+  const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
+  const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
   const outputFormatter = createOutputFormatter(globalFlags.format);
-  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
 
   const result = await runOnce({
     agentCommand: agent.agentCommand,
@@ -490,9 +573,10 @@ async function handleExec(
 async function handleSessionsList(
   explicitAgentName: string | undefined,
   command: Command,
+  config: ResolvedAcpxConfig,
 ): Promise<void> {
-  const globalFlags = resolveGlobalFlags(command);
-  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
   const sessions = await listSessionsForAgent(agent.agentCommand);
   printSessionsByFormat(sessions, globalFlags.format);
 }
@@ -501,9 +585,10 @@ async function handleSessionsClose(
   explicitAgentName: string | undefined,
   sessionName: string | undefined,
   command: Command,
+  config: ResolvedAcpxConfig,
 ): Promise<void> {
-  const globalFlags = resolveGlobalFlags(command);
-  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
 
   const record = await findSession({
     agentCommand: agent.agentCommand,
@@ -529,10 +614,11 @@ async function handleSessionsNew(
   explicitAgentName: string | undefined,
   flags: SessionsNewFlags,
   command: Command,
+  config: ResolvedAcpxConfig,
 ): Promise<void> {
-  const globalFlags = resolveGlobalFlags(command);
-  const permissionMode = resolvePermissionMode(globalFlags);
-  const agent = resolveAgentInvocation(explicitAgentName, globalFlags);
+  const globalFlags = resolveGlobalFlags(command, config);
+  const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
 
   const replaced = await findSession({
     agentCommand: agent.agentCommand,
@@ -566,23 +652,303 @@ async function handleSessionsNew(
   printNewSessionByFormat(created, replaced, globalFlags.format);
 }
 
+function printSessionDetailsByFormat(
+  record: SessionRecord,
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(`${JSON.stringify(record)}\n`);
+    return;
+  }
+
+  if (format === "quiet") {
+    process.stdout.write(`${record.id}\n`);
+    return;
+  }
+
+  process.stdout.write(`id: ${record.id}\n`);
+  process.stdout.write(`sessionId: ${record.sessionId}\n`);
+  process.stdout.write(`agent: ${record.agentCommand}\n`);
+  process.stdout.write(`cwd: ${record.cwd}\n`);
+  process.stdout.write(`name: ${record.name ?? "-"}\n`);
+  process.stdout.write(`created: ${record.createdAt}\n`);
+  process.stdout.write(`lastActivity: ${record.lastUsedAt}\n`);
+  process.stdout.write(`lastPrompt: ${record.lastPromptAt ?? "-"}\n`);
+  process.stdout.write(`closed: ${record.closed ? "yes" : "no"}\n`);
+  process.stdout.write(`closedAt: ${record.closedAt ?? "-"}\n`);
+  process.stdout.write(`pid: ${record.pid ?? "-"}\n`);
+  process.stdout.write(`agentStartedAt: ${record.agentStartedAt ?? "-"}\n`);
+  process.stdout.write(`lastExitCode: ${record.lastAgentExitCode ?? "-"}\n`);
+  process.stdout.write(`lastExitSignal: ${record.lastAgentExitSignal ?? "-"}\n`);
+  process.stdout.write(`lastExitAt: ${record.lastAgentExitAt ?? "-"}\n`);
+  process.stdout.write(
+    `disconnectReason: ${record.lastAgentDisconnectReason ?? "-"}\n`,
+  );
+  process.stdout.write(`historyEntries: ${record.turnHistory?.length ?? 0}\n`);
+}
+
+function printSessionHistoryByFormat(
+  record: SessionRecord,
+  limit: number,
+  format: OutputFormat,
+): void {
+  const history = record.turnHistory ?? [];
+  const visible = history.slice(Math.max(0, history.length - limit));
+
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        id: record.id,
+        sessionId: record.sessionId,
+        limit,
+        count: visible.length,
+        entries: visible,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    for (const entry of visible) {
+      process.stdout.write(`${entry.textPreview}\n`);
+    }
+    return;
+  }
+
+  process.stdout.write(
+    `session: ${record.id} (${visible.length}/${history.length} shown)\n`,
+  );
+  if (visible.length === 0) {
+    process.stdout.write("No history\n");
+    return;
+  }
+
+  for (const entry of visible) {
+    process.stdout.write(`${entry.timestamp}\t${entry.role}\t${entry.textPreview}\n`);
+  }
+}
+
+async function handleSessionsShow(
+  explicitAgentName: string | undefined,
+  sessionName: string | undefined,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const record = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: sessionName,
+    includeClosed: true,
+  });
+
+  if (!record) {
+    throw new Error(
+      sessionName
+        ? `No named session "${sessionName}" for cwd ${agent.cwd} and agent ${agent.agentName}`
+        : `No cwd session for ${agent.cwd} and agent ${agent.agentName}`,
+    );
+  }
+
+  printSessionDetailsByFormat(record, globalFlags.format);
+}
+
+async function handleSessionsHistory(
+  explicitAgentName: string | undefined,
+  sessionName: string | undefined,
+  flags: SessionsHistoryFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const record = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: sessionName,
+    includeClosed: true,
+  });
+
+  if (!record) {
+    throw new Error(
+      sessionName
+        ? `No named session "${sessionName}" for cwd ${agent.cwd} and agent ${agent.agentName}`
+        : `No cwd session for ${agent.cwd} and agent ${agent.agentName}`,
+    );
+  }
+
+  printSessionHistoryByFormat(record, flags.limit, globalFlags.format);
+}
+
+function formatUptime(startedAt: string | undefined): string | undefined {
+  if (!startedAt) {
+    return undefined;
+  }
+
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) {
+    return undefined;
+  }
+
+  const elapsedMs = Math.max(0, Date.now() - startedMs);
+  const seconds = Math.floor(elapsedMs / 1_000);
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remSeconds = seconds % 60;
+  return `${hours.toString().padStart(2, "0")}:${minutes
+    .toString()
+    .padStart(2, "0")}:${remSeconds.toString().padStart(2, "0")}`;
+}
+
+async function handleStatus(
+  explicitAgentName: string | undefined,
+  flags: StatusFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const record = await findSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.session,
+  });
+
+  if (!record) {
+    const payload = {
+      sessionId: null,
+      agentCommand: agent.agentCommand,
+      pid: null,
+      status: "no-session",
+      uptime: null,
+      lastPromptTime: null,
+      exitCode: null,
+      signal: null,
+    } as const;
+
+    if (globalFlags.format === "json") {
+      process.stdout.write(`${JSON.stringify(payload)}\n`);
+      return;
+    }
+    if (globalFlags.format === "quiet") {
+      process.stdout.write("no-session\n");
+      return;
+    }
+
+    process.stdout.write(`session: -\n`);
+    process.stdout.write(`agent: ${agent.agentCommand}\n`);
+    process.stdout.write(`pid: -\n`);
+    process.stdout.write(`status: no-session\n`);
+    process.stdout.write(`uptime: -\n`);
+    process.stdout.write(`lastPromptTime: -\n`);
+    return;
+  }
+
+  const running = isProcessAlive(record.pid);
+  const payload = {
+    sessionId: record.id,
+    agentCommand: record.agentCommand,
+    pid: record.pid ?? null,
+    status: running ? "running" : "dead",
+    uptime: running ? (formatUptime(record.agentStartedAt) ?? null) : null,
+    lastPromptTime: record.lastPromptAt ?? null,
+    exitCode: running ? null : (record.lastAgentExitCode ?? null),
+    signal: running ? null : (record.lastAgentExitSignal ?? null),
+  } as const;
+
+  if (globalFlags.format === "json") {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    return;
+  }
+
+  if (globalFlags.format === "quiet") {
+    process.stdout.write(`${payload.status}\n`);
+    return;
+  }
+
+  process.stdout.write(`session: ${payload.sessionId}\n`);
+  process.stdout.write(`agent: ${payload.agentCommand}\n`);
+  process.stdout.write(`pid: ${payload.pid ?? "-"}\n`);
+  process.stdout.write(`status: ${payload.status}\n`);
+  process.stdout.write(`uptime: ${payload.uptime ?? "-"}\n`);
+  process.stdout.write(`lastPromptTime: ${payload.lastPromptTime ?? "-"}\n`);
+  if (payload.status === "dead") {
+    process.stdout.write(`exitCode: ${payload.exitCode ?? "-"}\n`);
+    process.stdout.write(`signal: ${payload.signal ?? "-"}\n`);
+  }
+}
+
+async function handleConfigShow(
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const payload = {
+    ...toConfigDisplay(config),
+    paths: {
+      global: config.globalPath,
+      project: config.projectPath,
+    },
+    loaded: {
+      global: config.hasGlobalConfig,
+      project: config.hasProjectConfig,
+    },
+  };
+
+  if (globalFlags.format === "json") {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    return;
+  }
+
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+async function handleConfigInit(
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const result = await initGlobalConfigFile();
+  if (globalFlags.format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        path: result.path,
+        created: result.created,
+      })}\n`,
+    );
+    return;
+  }
+  if (globalFlags.format === "quiet") {
+    process.stdout.write(`${result.path}\n`);
+    return;
+  }
+
+  if (result.created) {
+    process.stdout.write(`Created ${result.path}\n`);
+    return;
+  }
+  process.stdout.write(`Config already exists: ${result.path}\n`);
+}
+
 function registerSessionsCommand(
   parent: Command,
   explicitAgentName: string | undefined,
+  config: ResolvedAcpxConfig,
 ): void {
   const sessionsCommand = parent
     .command("sessions")
     .description("List, create, or close sessions for this agent");
 
   sessionsCommand.action(async function (this: Command) {
-    await handleSessionsList(explicitAgentName, this);
+    await handleSessionsList(explicitAgentName, this, config);
   });
 
   sessionsCommand
     .command("list")
     .description("List sessions")
     .action(async function (this: Command) {
-      await handleSessionsList(explicitAgentName, this);
+      await handleSessionsList(explicitAgentName, this, config);
     });
 
   sessionsCommand
@@ -590,7 +956,7 @@ function registerSessionsCommand(
     .description("Create a fresh session for current cwd")
     .option("--name <name>", "Session name", parseSessionName)
     .action(async function (this: Command, flags: SessionsNewFlags) {
-      await handleSessionsNew(explicitAgentName, flags, this);
+      await handleSessionsNew(explicitAgentName, flags, this, config);
     });
 
   sessionsCommand
@@ -598,11 +964,41 @@ function registerSessionsCommand(
     .description("Close session for current cwd")
     .argument("[name]", "Session name", parseSessionName)
     .action(async function (this: Command, name?: string) {
-      await handleSessionsClose(explicitAgentName, name, this);
+      await handleSessionsClose(explicitAgentName, name, this, config);
+    });
+
+  sessionsCommand
+    .command("show")
+    .description("Show session metadata for current cwd")
+    .argument("[name]", "Session name", parseSessionName)
+    .action(async function (this: Command, name?: string) {
+      await handleSessionsShow(explicitAgentName, name, this, config);
+    });
+
+  sessionsCommand
+    .command("history")
+    .description("Show recent session history entries")
+    .argument("[name]", "Session name", parseSessionName)
+    .option(
+      "--limit <count>",
+      "Maximum number of entries to show (default: 20)",
+      parseHistoryLimit,
+      DEFAULT_HISTORY_LIMIT,
+    )
+    .action(async function (
+      this: Command,
+      name: string | undefined,
+      flags: SessionsHistoryFlags,
+    ) {
+      await handleSessionsHistory(explicitAgentName, name, flags, this, config);
     });
 }
 
-function registerAgentCommand(program: Command, agentName: string): void {
+function registerAgentCommand(
+  program: Command,
+  agentName: string,
+  config: ResolvedAcpxConfig,
+): void {
   const agentCommand = program
     .command(agentName)
     .description(`Use ${agentName} agent`)
@@ -610,13 +1006,13 @@ function registerAgentCommand(program: Command, agentName: string): void {
     .showHelpAfterError();
 
   addSessionOption(agentCommand);
-
+  addPromptInputOption(agentCommand);
   agentCommand.action(async function (
     this: Command,
     promptParts: string[],
     flags: PromptFlags,
   ) {
-    await handlePrompt(agentName, promptParts, flags, this);
+    await handlePrompt(agentName, promptParts, flags, this, config);
   });
 
   const promptCommand = agentCommand
@@ -625,53 +1021,104 @@ function registerAgentCommand(program: Command, agentName: string): void {
     .argument("[prompt...]", "Prompt text")
     .showHelpAfterError();
   addSessionOption(promptCommand);
-
+  addPromptInputOption(promptCommand);
   promptCommand.action(async function (
     this: Command,
     promptParts: string[],
     flags: PromptFlags,
   ) {
-    await handlePrompt(agentName, promptParts, flags, this);
+    await handlePrompt(agentName, promptParts, flags, this, config);
   });
 
-  agentCommand
+  const execCommand = agentCommand
     .command("exec")
     .description("One-shot prompt without saved session")
     .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError()
-    .action(async function (this: Command, promptParts: string[]) {
-      await handleExec(agentName, promptParts, this);
-    });
+    .showHelpAfterError();
+  addPromptInputOption(execCommand);
+  execCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: ExecFlags,
+  ) {
+    await handleExec(agentName, promptParts, flags, this, config);
+  });
 
-  registerSessionsCommand(agentCommand, agentName);
+  const statusCommand = agentCommand
+    .command("status")
+    .description("Show local status of current session agent process");
+  addSessionNameOption(statusCommand);
+  statusCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleStatus(agentName, flags, this, config);
+  });
+
+  registerSessionsCommand(agentCommand, agentName, config);
 }
 
-function registerDefaultCommands(program: Command): void {
+function registerConfigCommand(program: Command, config: ResolvedAcpxConfig): void {
+  const configCommand = program
+    .command("config")
+    .description("Inspect and initialize acpx configuration");
+
+  configCommand
+    .command("show")
+    .description("Show resolved config")
+    .action(async function (this: Command) {
+      await handleConfigShow(this, config);
+    });
+
+  configCommand
+    .command("init")
+    .description("Create global config template")
+    .action(async function (this: Command) {
+      await handleConfigInit(this, config);
+    });
+
+  configCommand.action(async function (this: Command) {
+    await handleConfigShow(this, config);
+  });
+}
+
+function registerDefaultCommands(program: Command, config: ResolvedAcpxConfig): void {
   const promptCommand = program
     .command("prompt")
-    .description(`Prompt using ${DEFAULT_AGENT_NAME} by default`)
+    .description(`Prompt using ${config.defaultAgent} by default`)
     .argument("[prompt...]", "Prompt text")
     .showHelpAfterError();
   addSessionOption(promptCommand);
-
+  addPromptInputOption(promptCommand);
   promptCommand.action(async function (
     this: Command,
     promptParts: string[],
     flags: PromptFlags,
   ) {
-    await handlePrompt(undefined, promptParts, flags, this);
+    await handlePrompt(undefined, promptParts, flags, this, config);
   });
 
-  program
+  const execCommand = program
     .command("exec")
-    .description(`One-shot prompt using ${DEFAULT_AGENT_NAME} by default`)
+    .description(`One-shot prompt using ${config.defaultAgent} by default`)
     .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError()
-    .action(async function (this: Command, promptParts: string[]) {
-      await handleExec(undefined, promptParts, this);
-    });
+    .showHelpAfterError();
+  addPromptInputOption(execCommand);
+  execCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: ExecFlags,
+  ) {
+    await handleExec(undefined, promptParts, flags, this, config);
+  });
 
-  registerSessionsCommand(program, undefined);
+  const statusCommand = program
+    .command("status")
+    .description(`Show local status for ${config.defaultAgent} by default`);
+  addSessionNameOption(statusCommand);
+  statusCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleStatus(undefined, flags, this, config);
+  });
+
+  registerSessionsCommand(program, undefined, config);
+  registerConfigCommand(program, config);
 }
 
 type AgentTokenScan = {
@@ -708,7 +1155,8 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
       token === "--cwd" ||
       token === "--format" ||
       token === "--timeout" ||
-      token === "--ttl"
+      token === "--ttl" ||
+      token === "--file"
     ) {
       index += 1;
       continue;
@@ -718,7 +1166,8 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
       token.startsWith("--cwd=") ||
       token.startsWith("--format=") ||
       token.startsWith("--timeout=") ||
-      token.startsWith("--ttl=")
+      token.startsWith("--ttl=") ||
+      token.startsWith("--file=")
     ) {
       continue;
     }
@@ -738,14 +1187,40 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
   return { hasAgentOverride };
 }
 
+function detectInitialCwd(argv: string[]): string {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--cwd") {
+      const next = argv[index + 1];
+      if (next && next !== "--") {
+        return path.resolve(next);
+      }
+      break;
+    }
+    if (token.startsWith("--cwd=")) {
+      const value = token.slice("--cwd=".length).trim();
+      if (value.length > 0) {
+        return path.resolve(value);
+      }
+      break;
+    }
+    if (token === "--") {
+      break;
+    }
+  }
+  return process.cwd();
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
   await maybeHandleSkillflag(argv, {
     skillsRoot: findSkillsRoot(import.meta.url),
     includeBundledSkill: false,
   });
 
-  const program = new Command();
+  const config = await loadResolvedConfig(detectInitialCwd(argv.slice(2)));
+  const builtInAgents = listBuiltInAgents(config.agents);
 
+  const program = new Command();
   program
     .name("acpx")
     .description("Headless CLI client for the Agent Client Protocol")
@@ -753,12 +1228,11 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 
   addGlobalFlags(program);
 
-  const builtInAgents = listBuiltInAgents();
   for (const agentName of builtInAgents) {
-    registerAgentCommand(program, agentName);
+    registerAgentCommand(program, agentName, config);
   }
 
-  registerDefaultCommands(program);
+  registerDefaultCommands(program, config);
 
   const scan = detectAgentToken(argv.slice(2));
   if (
@@ -767,7 +1241,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     !TOP_LEVEL_VERBS.has(scan.token) &&
     !builtInAgents.includes(scan.token)
   ) {
-    registerAgentCommand(program, scan.token);
+    registerAgentCommand(program, scan.token, config);
   }
 
   program.argument("[prompt...]", "Prompt text").action(async function (
@@ -779,7 +1253,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
       return;
     }
 
-    await handlePrompt(undefined, promptParts, {}, this);
+    await handlePrompt(undefined, promptParts, {}, this, config);
   });
 
   program.addHelpText(
@@ -795,6 +1269,9 @@ Examples:
   acpx codex sessions
   acpx codex sessions new --name backend
   acpx codex sessions close backend
+  acpx codex status
+  acpx config show
+  acpx config init
   acpx --ttl 30 codex "investigate flaky tests"
   acpx claude "refactor auth"
   acpx gemini "add logging"

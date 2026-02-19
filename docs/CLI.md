@@ -22,13 +22,16 @@ Global options apply to all commands.
 ```bash
 acpx [global_options] [prompt_text...]
 acpx [global_options] prompt [prompt_options] [prompt_text...]
-acpx [global_options] exec [prompt_text...]
-acpx [global_options] sessions [list | new [--name <name>] | close [name]]
+acpx [global_options] exec [prompt_options] [prompt_text...]
+acpx [global_options] status [-s <name>]
+acpx [global_options] sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
+acpx [global_options] config [show | init]
 
 acpx [global_options] <agent> [prompt_options] [prompt_text...]
 acpx [global_options] <agent> prompt [prompt_options] [prompt_text...]
-acpx [global_options] <agent> exec [prompt_text...]
-acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name]]
+acpx [global_options] <agent> exec [prompt_options] [prompt_text...]
+acpx [global_options] <agent> status [-s <name>]
+acpx [global_options] <agent> sessions [list | new [--name <name>] | close [name] | show [name] | history [name] [--limit <count>]]
 ```
 
 `<agent>` can be:
@@ -42,12 +45,14 @@ Prompt options:
 ```bash
 -s, --session <name>   Use named session instead of cwd default
 --no-wait              Queue prompt and return immediately if session is busy
+-f, --file <path>      Read prompt text from file (`-` means stdin)
 ```
 
 Notes:
 
 - Top-level `prompt`, `exec`, `sessions`, and bare `acpx <prompt>` default to `codex`.
 - If a prompt argument is omitted, `acpx` reads prompt text from stdin when piped.
+- `--file` works for implicit prompt, `prompt`, and `exec` commands.
 - `acpx` with no args in an interactive terminal shows help.
 
 ## Global options
@@ -159,8 +164,8 @@ acpx [global_options] [prompt_text...]   # defaults to codex
 One-shot prompt (no saved session):
 
 ```bash
-acpx [global_options] <agent> exec [prompt_text...]
-acpx [global_options] exec [prompt_text...]   # defaults to codex
+acpx [global_options] <agent> exec [prompt_options] [prompt_text...]
+acpx [global_options] exec [prompt_options] [prompt_text...]   # defaults to codex
 ```
 
 Behavior:
@@ -168,6 +173,7 @@ Behavior:
 - Creates temporary ACP session
 - Sends prompt once
 - Does not write/use a saved session record
+- Supports prompt text from args, stdin, `--file <path>`, and `--file -`
 
 ## `sessions` subcommand
 
@@ -178,6 +184,10 @@ acpx [global_options] <agent> sessions new
 acpx [global_options] <agent> sessions new --name <name>
 acpx [global_options] <agent> sessions close
 acpx [global_options] <agent> sessions close <name>
+acpx [global_options] <agent> sessions show
+acpx [global_options] <agent> sessions show <name>
+acpx [global_options] <agent> sessions history
+acpx [global_options] <agent> sessions history <name> [--limit <count>]
 
 acpx [global_options] sessions ...   # defaults to codex
 ```
@@ -191,7 +201,60 @@ Behavior:
 - creating a fresh session soft-closes the previous open session in that scope (if present)
 - `sessions close` soft-closes the current cwd default session
 - `sessions close <name>` soft-closes current cwd named session
+- `sessions show [name]` displays stored session metadata
+- `sessions history [name]` displays stored turn history previews (default 20, configurable with `--limit`)
 - close errors if the target session does not exist
+
+## `status` command
+
+```bash
+acpx [global_options] <agent> status
+acpx [global_options] <agent> status -s <name>
+acpx [global_options] status
+acpx [global_options] status -s <name>
+```
+
+Shows local process status for the cwd-scoped session:
+
+- `running`, `dead`, or `no-session`
+- session id, agent command, pid
+- uptime when running
+- last prompt timestamp
+- last known exit code/signal when dead
+
+Status checks are local and PID-based (`kill(pid, 0)` semantics).
+
+## `config` command
+
+```bash
+acpx [global_options] config show
+acpx [global_options] config init
+```
+
+- `config show` prints the resolved config from global + project files.
+- `config init` writes a default global config template if missing.
+
+Config files:
+
+- global: `${XDG_CONFIG_HOME:-~/.config}/acpx/config.json`
+- project: `<cwd>/.acpxrc.json` (merged on top of global)
+
+Supported keys:
+
+```json
+{
+  "defaultAgent": "codex",
+  "defaultPermissions": "approve-all",
+  "ttl": 300,
+  "timeout": null,
+  "format": "text",
+  "agents": {
+    "my-custom": { "command": "./bin/my-acp-server" }
+  }
+}
+```
+
+CLI flags always override config values.
 
 ## `--agent` escape hatch
 
@@ -231,6 +294,8 @@ For prompt commands:
 
 `sessions new [--name <name>]` is the explicit creation point for saved session records.
 
+If a saved session PID is dead, `acpx` respawns the agent, tries `session/load`, and transparently falls back to `session/new` when loading fails.
+
 ### Prompt queueing
 
 When a prompt is already in flight for a session, `acpx` uses a per-session queue owner process:
@@ -240,12 +305,14 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 3. owner drains queued prompts one-by-one after each completed turn
 4. after the queue drains, owner waits for new work up to TTL (`--ttl`, default 300s)
 5. submitter either blocks until completion (default) or exits immediately with `--no-wait`
+6. if interrupted (`Ctrl+C`) during an active turn, `acpx` sends `session/cancel` first, waits briefly for cancelled completion, then force-kills only if needed
 
 ### Soft-close behavior
 
 - soft-closed sessions remain on disk with `closed: true` and `closedAt`
 - auto-resume ignores closed sessions during scope lookup
 - closed sessions still keep full record data and can be resumed explicitly via record id/session load flows
+- session records also keep lightweight turn history previews used by `sessions history`
 
 ### Named sessions
 
@@ -280,6 +347,12 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 - `sessions close` with `text`: closed record id
 - `sessions close` with `json`: `{"type":"session_closed",...}`
 - `sessions close` with `quiet`: no output
+- `sessions show` with `text`: key/value metadata dump
+- `sessions show` with `json`: full session record object
+- `sessions history` with `text`: tab-separated `timestamp role textPreview` entries
+- `sessions history` with `json`: object containing `entries` array
+- `status` with `text`: key/value process status lines
+- `status` with `json`: structured status object with `running|dead|no-session`
 
 ## Permission modes
 
@@ -339,7 +412,19 @@ acpx claude exec 'summarize src/session.ts in 5 bullets'
 # Manage sessions
 acpx codex sessions
 acpx codex sessions new --name docs
+acpx codex sessions show docs
+acpx codex sessions history docs --limit 10
 acpx codex sessions close docs
+acpx codex status
+
+# Prompt from file/stdin
+echo 'triage failing tests' | acpx codex
+acpx codex --file prompt.md
+acpx codex --file - 'also check lint warnings'
+
+# Config inspection
+acpx config show
+acpx config init
 
 # JSON automation pipeline
 acpx --format json codex exec 'review latest diff for security issues' \
