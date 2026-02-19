@@ -1003,6 +1003,8 @@ function registerAgentCommand(
     .command(agentName)
     .description(`Use ${agentName} agent`)
     .argument("[prompt...]", "Prompt text")
+    .enablePositionalOptions()
+    .passThroughOptions()
     .showHelpAfterError();
 
   addSessionOption(agentCommand);
@@ -1224,6 +1226,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   program
     .name("acpx")
     .description("Headless CLI client for the Agent Client Protocol")
+    .enablePositionalOptions()
     .showHelpAfterError();
 
   addGlobalFlags(program);
