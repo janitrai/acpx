@@ -180,6 +180,155 @@ test("cancel prints nothing to cancel and exits success when no session exists",
   });
 });
 
+test("cancel resolves named session when -s is before subcommand", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    await writeSessionRecord(homeDir, {
+      id: "named-cancel-session",
+      sessionId: "named-cancel-session",
+      agentCommand: "npx @zed-industries/codex-acp",
+      cwd,
+      name: "named",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "-s", "named", "cancel"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout.trim()) as {
+      sessionId: string;
+      cancelled: boolean;
+    };
+    assert.equal(payload.sessionId, "named-cancel-session");
+    assert.equal(payload.cancelled, false);
+  });
+});
+
+test("status resolves named session when -s is before subcommand", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    await writeSessionRecord(homeDir, {
+      id: "named-status-session",
+      sessionId: "named-status-session",
+      agentCommand: "npx @zed-industries/codex-acp",
+      cwd,
+      name: "named",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "-s", "named", "status"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout.trim()) as {
+      sessionId: string | null;
+      status: string;
+    };
+    assert.equal(payload.sessionId, "named-status-session");
+    assert.equal(payload.status, "dead");
+    assert.notEqual(payload.status, "no-session");
+  });
+});
+
+test("set-mode resolves named session when -s is before subcommand", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+
+    const missingAgentCommand = "acpx-test-missing-agent-binary";
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: { command: missingAgentCommand },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await writeSessionRecord(homeDir, {
+      id: "named-set-mode-session",
+      sessionId: "named-set-mode-session",
+      agentCommand: missingAgentCommand,
+      cwd,
+      name: "named",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "-s", "named", "set-mode", "plan"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 1);
+    assert.doesNotMatch(result.stderr, /No acpx session found/);
+    assert.match(result.stderr, /ENOENT|spawn|not found/i);
+  });
+});
+
+test("set resolves named session when -s is before subcommand", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+
+    const missingAgentCommand = "acpx-test-missing-agent-binary-2";
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: { command: missingAgentCommand },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    await writeSessionRecord(homeDir, {
+      id: "named-set-config-session",
+      sessionId: "named-set-config-session",
+      agentCommand: missingAgentCommand,
+      cwd,
+      name: "named",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(
+      ["--cwd", cwd, "codex", "-s", "named", "set", "approval_policy", "strict"],
+      homeDir,
+    );
+
+    assert.equal(result.code, 1);
+    assert.doesNotMatch(result.stderr, /No acpx session found/);
+    assert.match(result.stderr, /ENOENT|spawn|not found/i);
+  });
+});
+
 test("prompt reads from stdin when no prompt argument is provided", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
