@@ -304,27 +304,6 @@ function resolveSessionNameFromFlags(
     return parseSessionName((parentOpts as { session: string }).session);
   }
 
-  // Final fallback: parse argv directly. This catches cases where Commander
-  // consumes the option on a parent command but does not expose it via opts().
-  for (let i = process.argv.length - 2; i >= 0; i -= 1) {
-    const token = process.argv[i];
-    if (token !== "-s" && token !== "--session") {
-      continue;
-    }
-    const value = process.argv[i + 1];
-    if (
-      typeof value === "string" &&
-      value.trim().length > 0 &&
-      !value.startsWith("-")
-    ) {
-      try {
-        return parseSessionName(value);
-      } catch {
-        return undefined;
-      }
-    }
-  }
-
   return undefined;
 }
 
@@ -1249,6 +1228,97 @@ function registerSessionsCommand(
     });
 }
 
+type SharedSubcommandDescriptions = {
+  prompt: string;
+  exec: string;
+  cancel: string;
+  setMode: string;
+  setConfig: string;
+  status: string;
+};
+
+function registerSharedAgentSubcommands(
+  parent: Command,
+  explicitAgentName: string | undefined,
+  config: ResolvedAcpxConfig,
+  descriptions: SharedSubcommandDescriptions,
+): void {
+  const promptCommand = parent
+    .command("prompt")
+    .description(descriptions.prompt)
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError();
+  addSessionOption(promptCommand);
+  addPromptInputOption(promptCommand);
+  promptCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: PromptFlags,
+  ) {
+    await handlePrompt(explicitAgentName, promptParts, flags, this, config);
+  });
+
+  const execCommand = parent
+    .command("exec")
+    .description(descriptions.exec)
+    .argument("[prompt...]", "Prompt text")
+    .showHelpAfterError();
+  addPromptInputOption(execCommand);
+  execCommand.action(async function (
+    this: Command,
+    promptParts: string[],
+    flags: ExecFlags,
+  ) {
+    await handleExec(explicitAgentName, promptParts, flags, this, config);
+  });
+
+  const cancelCommand = parent.command("cancel").description(descriptions.cancel);
+  addSessionNameOption(cancelCommand);
+  cancelCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleCancel(explicitAgentName, flags, this, config);
+  });
+
+  const setModeCommand = parent
+    .command("set-mode")
+    .description(descriptions.setMode)
+    .argument("<mode>", "Mode id", (value: string) =>
+      parseNonEmptyValue("Mode", value),
+    );
+  addSessionNameOption(setModeCommand);
+  setModeCommand.action(async function (
+    this: Command,
+    modeId: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetMode(explicitAgentName, modeId, flags, this, config);
+  });
+
+  const setConfigCommand = parent
+    .command("set")
+    .description(descriptions.setConfig)
+    .argument("<key>", "Config option id", (value: string) =>
+      parseNonEmptyValue("Config option key", value),
+    )
+    .argument("<value>", "Config option value", (value: string) =>
+      parseNonEmptyValue("Config option value", value),
+    );
+  addSessionNameOption(setConfigCommand);
+  setConfigCommand.action(async function (
+    this: Command,
+    key: string,
+    value: string,
+    flags: StatusFlags,
+  ) {
+    await handleSetConfigOption(explicitAgentName, key, value, flags, this, config);
+  });
+
+  const statusCommand = parent.command("status").description(descriptions.status);
+  addSessionNameOption(statusCommand);
+  statusCommand.action(async function (this: Command, flags: StatusFlags) {
+    await handleStatus(explicitAgentName, flags, this, config);
+  });
+}
+
 function registerAgentCommand(
   program: Command,
   agentName: string,
@@ -1272,83 +1342,13 @@ function registerAgentCommand(
     await handlePrompt(agentName, promptParts, flags, this, config);
   });
 
-  const promptCommand = agentCommand
-    .command("prompt")
-    .description("Prompt using persistent session")
-    .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError();
-  addSessionOption(promptCommand);
-  addPromptInputOption(promptCommand);
-  promptCommand.action(async function (
-    this: Command,
-    promptParts: string[],
-    flags: PromptFlags,
-  ) {
-    await handlePrompt(agentName, promptParts, flags, this, config);
-  });
-
-  const execCommand = agentCommand
-    .command("exec")
-    .description("One-shot prompt without saved session")
-    .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError();
-  addPromptInputOption(execCommand);
-  execCommand.action(async function (
-    this: Command,
-    promptParts: string[],
-    flags: ExecFlags,
-  ) {
-    await handleExec(agentName, promptParts, flags, this, config);
-  });
-
-  const cancelCommand = agentCommand
-    .command("cancel")
-    .description("Cooperatively cancel current in-flight prompt");
-  addSessionNameOption(cancelCommand);
-  cancelCommand.action(async function (this: Command, flags: StatusFlags) {
-    await handleCancel(agentName, flags, this, config);
-  });
-
-  const setModeCommand = agentCommand
-    .command("set-mode")
-    .description("Set session mode")
-    .argument("<mode>", "Mode id", (value: string) =>
-      parseNonEmptyValue("Mode", value),
-    );
-  addSessionNameOption(setModeCommand);
-  setModeCommand.action(async function (
-    this: Command,
-    modeId: string,
-    flags: StatusFlags,
-  ) {
-    await handleSetMode(agentName, modeId, flags, this, config);
-  });
-
-  const setConfigCommand = agentCommand
-    .command("set")
-    .description("Set session config option")
-    .argument("<key>", "Config option id", (value: string) =>
-      parseNonEmptyValue("Config option key", value),
-    )
-    .argument("<value>", "Config option value", (value: string) =>
-      parseNonEmptyValue("Config option value", value),
-    );
-  addSessionNameOption(setConfigCommand);
-  setConfigCommand.action(async function (
-    this: Command,
-    key: string,
-    value: string,
-    flags: StatusFlags,
-  ) {
-    await handleSetConfigOption(agentName, key, value, flags, this, config);
-  });
-
-  const statusCommand = agentCommand
-    .command("status")
-    .description("Show local status of current session agent process");
-  addSessionNameOption(statusCommand);
-  statusCommand.action(async function (this: Command, flags: StatusFlags) {
-    await handleStatus(agentName, flags, this, config);
+  registerSharedAgentSubcommands(agentCommand, agentName, config, {
+    prompt: "Prompt using persistent session",
+    exec: "One-shot prompt without saved session",
+    cancel: "Cooperatively cancel current in-flight prompt",
+    setMode: "Set session mode",
+    setConfig: "Set session config option",
+    status: "Show local status of current session agent process",
   });
 
   registerSessionsCommand(agentCommand, agentName, config);
@@ -1379,83 +1379,13 @@ function registerConfigCommand(program: Command, config: ResolvedAcpxConfig): vo
 }
 
 function registerDefaultCommands(program: Command, config: ResolvedAcpxConfig): void {
-  const promptCommand = program
-    .command("prompt")
-    .description(`Prompt using ${config.defaultAgent} by default`)
-    .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError();
-  addSessionOption(promptCommand);
-  addPromptInputOption(promptCommand);
-  promptCommand.action(async function (
-    this: Command,
-    promptParts: string[],
-    flags: PromptFlags,
-  ) {
-    await handlePrompt(undefined, promptParts, flags, this, config);
-  });
-
-  const execCommand = program
-    .command("exec")
-    .description(`One-shot prompt using ${config.defaultAgent} by default`)
-    .argument("[prompt...]", "Prompt text")
-    .showHelpAfterError();
-  addPromptInputOption(execCommand);
-  execCommand.action(async function (
-    this: Command,
-    promptParts: string[],
-    flags: ExecFlags,
-  ) {
-    await handleExec(undefined, promptParts, flags, this, config);
-  });
-
-  const cancelCommand = program
-    .command("cancel")
-    .description(`Cancel active prompt for ${config.defaultAgent} by default`);
-  addSessionNameOption(cancelCommand);
-  cancelCommand.action(async function (this: Command, flags: StatusFlags) {
-    await handleCancel(undefined, flags, this, config);
-  });
-
-  const setModeCommand = program
-    .command("set-mode")
-    .description(`Set session mode for ${config.defaultAgent} by default`)
-    .argument("<mode>", "Mode id", (value: string) =>
-      parseNonEmptyValue("Mode", value),
-    );
-  addSessionNameOption(setModeCommand);
-  setModeCommand.action(async function (
-    this: Command,
-    modeId: string,
-    flags: StatusFlags,
-  ) {
-    await handleSetMode(undefined, modeId, flags, this, config);
-  });
-
-  const setConfigCommand = program
-    .command("set")
-    .description(`Set session config option for ${config.defaultAgent} by default`)
-    .argument("<key>", "Config option id", (value: string) =>
-      parseNonEmptyValue("Config option key", value),
-    )
-    .argument("<value>", "Config option value", (value: string) =>
-      parseNonEmptyValue("Config option value", value),
-    );
-  addSessionNameOption(setConfigCommand);
-  setConfigCommand.action(async function (
-    this: Command,
-    key: string,
-    value: string,
-    flags: StatusFlags,
-  ) {
-    await handleSetConfigOption(undefined, key, value, flags, this, config);
-  });
-
-  const statusCommand = program
-    .command("status")
-    .description(`Show local status for ${config.defaultAgent} by default`);
-  addSessionNameOption(statusCommand);
-  statusCommand.action(async function (this: Command, flags: StatusFlags) {
-    await handleStatus(undefined, flags, this, config);
+  registerSharedAgentSubcommands(program, undefined, config, {
+    prompt: `Prompt using ${config.defaultAgent} by default`,
+    exec: `One-shot prompt using ${config.defaultAgent} by default`,
+    cancel: `Cancel active prompt for ${config.defaultAgent} by default`,
+    setMode: `Set session mode for ${config.defaultAgent} by default`,
+    setConfig: `Set session config option for ${config.defaultAgent} by default`,
+    status: `Show local status for ${config.defaultAgent} by default`,
   });
 
   registerSessionsCommand(program, undefined, config);
