@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="acpx_banner.svg" alt="acpx banner" width="100%" />
+</p>
+
 # acpx
 
 Your agents love acpx! 🤖❤️ They hate having to scrape characters from a PTY session 😤
