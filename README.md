@@ -67,27 +67,21 @@ Copy the block below and paste it into your OpenClaw, Pi, Claude Code, or simila
 I want you to use acpx to run coding agents over the Agent Client Protocol
 (ACP) instead of scraping PTY sessions. Please do the following:
 
-1. Install acpx (global is recommended for frequent use, but npx works fine too):
-   npm install -g acpx@latest
+1. Install the acpx skill so you have the full reference available:
+   npx acpx@latest --skill install acpx
 
-   Or, run without installing:
-   npx acpx@latest
-
-2. Install the acpx skill so you have the full reference available:
-   acpx --skill install acpx
-
-3. Read the acpx skill reference so you know every command, flag, and
+2. Read the acpx skill reference so you know every command, flag, and
    workflow pattern:
    https://raw.githubusercontent.com/janitrai/acpx/main/skills/acpx/SKILL.md
 
-4. If you need the full CLI reference with all options and examples:
+3. If you need the full CLI reference with all options and examples:
    https://raw.githubusercontent.com/janitrai/acpx/main/docs/CLI.md
 
 From now on, when you need to delegate work to a coding agent, use acpx
 instead of spawning raw terminal sessions. For example:
-  acpx codex "fix the failing tests"
-  acpx claude "refactor the auth module"
-  acpx codex exec "one-shot: summarize this repo"
+  npx acpx@latest codex "fix the failing tests"
+  npx acpx@latest claude "refactor the auth module"
+  npx acpx@latest codex exec "one-shot: summarize this repo"
 ```
 
 ## Install
