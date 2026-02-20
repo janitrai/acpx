@@ -74,9 +74,7 @@ I want you to use acpx to run coding agents over the Agent Client Protocol
    npx acpx@latest
 
 2. Install the acpx skill so you have the full reference available:
-   acpx --skill export acpx | npx skillflag install
-   (This launches an interactive wizard — pick your agent and scope with
-   arrow keys, or pass --agent <agent> --scope <scope> to skip the wizard.)
+   acpx --skill install acpx
 
 3. Read the acpx skill reference so you know every command, flag, and
    workflow pattern:
