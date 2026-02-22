@@ -19,6 +19,7 @@ import {
   type QueueSubmitRequest,
 } from "./queue-messages.js";
 import type {
+  NonInteractivePermissionPolicy,
   OutputFormatter,
   PermissionMode,
   SessionEnqueueResult,
@@ -124,6 +125,7 @@ export type QueueTask = {
   requestId: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   timeoutMs?: number;
   waitForCompletion: boolean;
   send: (message: QueueOwnerMessage) => void;
@@ -604,6 +606,7 @@ export class SessionQueueOwner {
         requestId: request.requestId,
         message: request.message,
         permissionMode: request.permissionMode,
+        nonInteractivePermissions: request.nonInteractivePermissions,
         timeoutMs: request.timeoutMs,
         waitForCompletion: request.waitForCompletion,
         send: (message) => {
@@ -654,6 +657,7 @@ export type SubmitToQueueOwnerOptions = {
   sessionId: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   outputFormatter: OutputFormatter;
   timeoutMs?: number;
   waitForCompletion: boolean;
@@ -676,9 +680,16 @@ async function submitToQueueOwner(
     requestId,
     message: options.message,
     permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     timeoutMs: options.timeoutMs,
     waitForCompletion: options.waitForCompletion,
   };
+
+  options.outputFormatter.setContext({
+    sessionId: options.sessionId,
+    requestId,
+    stream: "prompt",
+  });
 
   return await new Promise<SessionSendOutcome>((resolve, reject) => {
     let settled = false;

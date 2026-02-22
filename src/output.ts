@@ -10,9 +10,12 @@ import type {
 } from "@agentclientprotocol/sdk";
 import type {
   ClientOperation,
+  OutputErrorCode,
   OutputEvent,
+  OutputFormatterContext,
   OutputFormat,
   OutputFormatter,
+  OutputStream,
 } from "./types.js";
 
 type WritableLike = {
@@ -22,7 +25,17 @@ type WritableLike = {
 
 type OutputFormatterOptions = {
   stdout?: WritableLike;
+  jsonContext?: OutputFormatterContext;
 };
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+type JsonOutputEventPayload = DistributiveOmit<
+  OutputEvent,
+  "eventVersion" | "sessionId" | "requestId" | "seq" | "stream"
+>;
 
 type NormalizedToolStatus = ToolCallStatus | "unknown";
 
@@ -61,6 +74,9 @@ const OUTPUT_PRIORITY_KEYS = [
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+const DEFAULT_JSON_SESSION_ID = "unknown";
+const DEFAULT_JSON_STREAM: OutputStream = "prompt";
 
 function asStatus(status: ToolCallStatus | null | undefined): NormalizedToolStatus {
   return status ?? "unknown";
@@ -475,6 +491,10 @@ class TextOutputFormatter implements OutputFormatter {
     this.useColor = Boolean(stdout.isTTY);
   }
 
+  setContext(_context: OutputFormatterContext): void {
+    // no-op for text mode
+  }
+
   onSessionUpdate(notification: SessionNotification): void {
     const update = notification.update;
     if (update.sessionUpdate !== "agent_thought_chunk") {
@@ -519,6 +539,17 @@ class TextOutputFormatter implements OutputFormatter {
     this.flushThoughtBuffer();
     this.beginSection("done");
     this.writeLine(this.dim(`[done] ${stopReason}`));
+  }
+
+  onError(params: {
+    code: OutputErrorCode;
+    message: string;
+    retryable?: boolean;
+    timestamp?: string;
+  }): void {
+    this.flushThoughtBuffer();
+    this.beginSection("done");
+    this.writeLine(this.formatAnsi(`[error] ${params.code}: ${params.message}`, "31"));
   }
 
   onClientOperation(operation: ClientOperation): void {
@@ -754,9 +785,33 @@ class TextOutputFormatter implements OutputFormatter {
 
 class JsonOutputFormatter implements OutputFormatter {
   private readonly stdout: WritableLike;
+  private sessionId: string;
+  private requestId?: string;
+  private stream: OutputStream;
+  private sequence = 0;
 
-  constructor(stdout: WritableLike) {
+  constructor(stdout: WritableLike, context?: OutputFormatterContext) {
     this.stdout = stdout;
+    this.sessionId = context?.sessionId?.trim() || DEFAULT_JSON_SESSION_ID;
+    this.requestId = context?.requestId?.trim() || undefined;
+    this.stream = context?.stream ?? DEFAULT_JSON_STREAM;
+  }
+
+  setContext(context: OutputFormatterContext): void {
+    const nextSessionId =
+      context.sessionId?.trim() || this.sessionId || DEFAULT_JSON_SESSION_ID;
+    const nextRequestId = context.requestId?.trim() || undefined;
+    const nextStream = context.stream ?? this.stream ?? DEFAULT_JSON_STREAM;
+    const sessionChanged = nextSessionId !== this.sessionId;
+    const requestChanged = nextRequestId !== this.requestId;
+    const streamChanged = nextStream !== this.stream;
+
+    this.sessionId = nextSessionId;
+    this.requestId = nextRequestId;
+    this.stream = nextStream;
+    if (sessionChanged || requestChanged || streamChanged) {
+      this.sequence = 0;
+    }
   }
 
   onSessionUpdate(notification: SessionNotification): void {
@@ -834,6 +889,21 @@ class JsonOutputFormatter implements OutputFormatter {
     });
   }
 
+  onError(params: {
+    code: OutputErrorCode;
+    message: string;
+    retryable?: boolean;
+    timestamp?: string;
+  }): void {
+    this.emit({
+      type: "error",
+      code: params.code,
+      message: params.message,
+      retryable: params.retryable,
+      timestamp: params.timestamp ?? nowIso(),
+    });
+  }
+
   onClientOperation(operation: ClientOperation): void {
     this.emit({
       type: "client_operation",
@@ -849,8 +919,16 @@ class JsonOutputFormatter implements OutputFormatter {
     // no-op for streaming output
   }
 
-  private emit(event: OutputEvent): void {
-    this.stdout.write(`${JSON.stringify(event)}\n`);
+  private emit(event: JsonOutputEventPayload): void {
+    const payload = {
+      eventVersion: 1,
+      sessionId: this.sessionId || DEFAULT_JSON_SESSION_ID,
+      requestId: this.requestId,
+      seq: this.sequence++,
+      stream: this.stream ?? DEFAULT_JSON_STREAM,
+      ...event,
+    } as OutputEvent;
+    this.stdout.write(`${JSON.stringify(payload)}\n`);
   }
 }
 
@@ -860,6 +938,10 @@ class QuietOutputFormatter implements OutputFormatter {
 
   constructor(stdout: WritableLike) {
     this.stdout = stdout;
+  }
+
+  setContext(_context: OutputFormatterContext): void {
+    // no-op for quiet mode
   }
 
   onSessionUpdate(notification: SessionNotification): void {
@@ -876,6 +958,15 @@ class QuietOutputFormatter implements OutputFormatter {
   onDone(_stopReason: StopReason): void {
     const text = this.chunks.join("");
     this.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+  }
+
+  onError(_params: {
+    code: OutputErrorCode;
+    message: string;
+    retryable?: boolean;
+    timestamp?: string;
+  }): void {
+    // no-op in quiet mode
   }
 
   onClientOperation(_operation: ClientOperation): void {
@@ -897,7 +988,7 @@ export function createOutputFormatter(
     case "text":
       return new TextOutputFormatter(stdout);
     case "json":
-      return new JsonOutputFormatter(stdout);
+      return new JsonOutputFormatter(stdout, options.jsonContext);
     case "quiet":
       return new QuietOutputFormatter(stdout);
     default: {

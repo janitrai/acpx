@@ -2,7 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_AGENT_NAME, normalizeAgentName } from "./agent-registry.js";
-import type { AuthPolicy, OutputFormat, PermissionMode } from "./types.js";
+import type {
+  AuthPolicy,
+  NonInteractivePermissionPolicy,
+  OutputFormat,
+  PermissionMode,
+} from "./types.js";
 
 type ConfigAgentEntry = {
   command: string;
@@ -11,6 +16,7 @@ type ConfigAgentEntry = {
 type ConfigFileShape = {
   defaultAgent?: unknown;
   defaultPermissions?: unknown;
+  nonInteractivePermissions?: unknown;
   authPolicy?: unknown;
   ttl?: unknown;
   timeout?: unknown;
@@ -22,6 +28,7 @@ type ConfigFileShape = {
 export type ResolvedAcpxConfig = {
   defaultAgent: string;
   defaultPermissions: PermissionMode;
+  nonInteractivePermissions: NonInteractivePermissionPolicy;
   authPolicy: AuthPolicy;
   ttlMs: number;
   timeoutMs?: number;
@@ -42,6 +49,8 @@ type ConfigFileLoadResult = {
 const DEFAULT_TIMEOUT_MS = undefined;
 const DEFAULT_TTL_MS = 300_000;
 const DEFAULT_PERMISSION_MODE: PermissionMode = "approve-reads";
+const DEFAULT_NON_INTERACTIVE_PERMISSION_POLICY: NonInteractivePermissionPolicy =
+  "deny";
 const DEFAULT_AUTH_POLICY: AuthPolicy = "skip";
 const DEFAULT_OUTPUT_FORMAT: OutputFormat = "text";
 const VALID_PERMISSION_MODES = new Set<PermissionMode>([
@@ -49,6 +58,8 @@ const VALID_PERMISSION_MODES = new Set<PermissionMode>([
   "approve-reads",
   "deny-all",
 ]);
+const VALID_NON_INTERACTIVE_PERMISSION_POLICIES =
+  new Set<NonInteractivePermissionPolicy>(["deny", "fail"]);
 const VALID_AUTH_POLICIES = new Set<AuthPolicy>(["skip", "fail"]);
 const VALID_OUTPUT_FORMATS = new Set<OutputFormat>(["text", "json", "quiet"]);
 
@@ -104,6 +115,26 @@ function parsePermissionMode(
     );
   }
   return value as PermissionMode;
+}
+
+function parseNonInteractivePermissionPolicy(
+  value: unknown,
+  sourcePath: string,
+): NonInteractivePermissionPolicy | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string" ||
+    !VALID_NON_INTERACTIVE_PERMISSION_POLICIES.has(
+      value as NonInteractivePermissionPolicy,
+    )
+  ) {
+    throw new Error(
+      `Invalid config nonInteractivePermissions in ${sourcePath}: expected deny or fail`,
+    );
+  }
+  return value as NonInteractivePermissionPolicy;
 }
 
 function parseAuthPolicy(value: unknown, sourcePath: string): AuthPolicy | undefined {
@@ -268,6 +299,17 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
     parsePermissionMode(globalConfig?.defaultPermissions, globalPath) ??
     DEFAULT_PERMISSION_MODE;
 
+  const nonInteractivePermissions =
+    parseNonInteractivePermissionPolicy(
+      projectConfig?.nonInteractivePermissions,
+      projectPath,
+    ) ??
+    parseNonInteractivePermissionPolicy(
+      globalConfig?.nonInteractivePermissions,
+      globalPath,
+    ) ??
+    DEFAULT_NON_INTERACTIVE_PERMISSION_POLICY;
+
   const authPolicy =
     parseAuthPolicy(projectConfig?.authPolicy, projectPath) ??
     parseAuthPolicy(globalConfig?.authPolicy, globalPath) ??
@@ -308,6 +350,7 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
   return {
     defaultAgent,
     defaultPermissions,
+    nonInteractivePermissions,
     authPolicy,
     ttlMs,
     timeoutMs,
@@ -324,6 +367,7 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
 export function toConfigDisplay(config: ResolvedAcpxConfig): {
   defaultAgent: string;
   defaultPermissions: PermissionMode;
+  nonInteractivePermissions: NonInteractivePermissionPolicy;
   authPolicy: AuthPolicy;
   ttl: number;
   timeout: number | null;
@@ -339,6 +383,7 @@ export function toConfigDisplay(config: ResolvedAcpxConfig): {
   return {
     defaultAgent: config.defaultAgent,
     defaultPermissions: config.defaultPermissions,
+    nonInteractivePermissions: config.nonInteractivePermissions,
     authPolicy: config.authPolicy,
     ttl: Math.round(config.ttlMs / 1_000),
     timeout: config.timeoutMs == null ? null : config.timeoutMs / 1_000,
@@ -368,6 +413,7 @@ export async function initGlobalConfigFile(): Promise<{
   const payload = {
     defaultAgent: DEFAULT_AGENT_NAME,
     defaultPermissions: "approve-all",
+    nonInteractivePermissions: "deny",
     authPolicy: "skip",
     ttl: 300,
     timeout: null,

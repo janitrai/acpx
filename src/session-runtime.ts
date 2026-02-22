@@ -42,9 +42,12 @@ import {
 import type {
   AuthPolicy,
   ClientOperation,
+  NonInteractivePermissionPolicy,
+  OutputErrorCode,
   OutputFormatter,
   PermissionMode,
   RunPromptResult,
+  SessionEnsureResult,
   SessionHistoryEntry,
   SessionRecord,
   SessionSetConfigOptionResult,
@@ -81,6 +84,7 @@ export type RunOnceOptions = {
   cwd: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
@@ -92,6 +96,7 @@ export type SessionCreateOptions = {
   cwd: string;
   name?: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   verbose?: boolean;
@@ -101,12 +106,25 @@ export type SessionSendOptions = {
   sessionId: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
   verbose?: boolean;
   waitForCompletion?: boolean;
   ttlMs?: number;
+} & TimedRunOptions;
+
+export type SessionEnsureOptions = {
+  agentCommand: string;
+  cwd: string;
+  name?: string;
+  permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
+  authCredentials?: Record<string, string>;
+  authPolicy?: AuthPolicy;
+  verbose?: boolean;
+  walkBoundary?: string;
 } & TimedRunOptions;
 
 export type SessionCancelOptions = {
@@ -122,6 +140,7 @@ export type SessionCancelResult = {
 export type SessionSetModeOptions = {
   sessionId: string;
   modeId: string;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   verbose?: boolean;
@@ -131,6 +150,7 @@ export type SessionSetConfigOptionOptions = {
   sessionId: string;
   configId: string;
   value: string;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   verbose?: boolean;
@@ -212,6 +232,7 @@ type RunSessionPromptOptions = {
   sessionRecordId: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
@@ -231,6 +252,10 @@ class QueueTaskOutputFormatter implements OutputFormatter {
   constructor(task: QueueTask) {
     this.requestId = task.requestId;
     this.send = task.send;
+  }
+
+  setContext(): void {
+    // queue formatter context is fixed by task request id
   }
 
   onSessionUpdate(notification: SessionNotification): void {
@@ -257,12 +282,28 @@ class QueueTaskOutputFormatter implements OutputFormatter {
     });
   }
 
+  onError(params: {
+    code: OutputErrorCode;
+    message: string;
+    retryable?: boolean;
+    timestamp?: string;
+  }): void {
+    this.send({
+      type: "error",
+      requestId: this.requestId,
+      message: `${params.code}: ${params.message}`,
+    });
+  }
+
   flush(): void {
     // no-op for stream forwarding
   }
 }
 
 const DISCARD_OUTPUT_FORMATTER: OutputFormatter = {
+  setContext() {
+    // no-op
+  },
   onSessionUpdate() {
     // no-op
   },
@@ -270,6 +311,9 @@ const DISCARD_OUTPUT_FORMATTER: OutputFormatter = {
     // no-op
   },
   onDone() {
+    // no-op
+  },
+  onError() {
     // no-op
   },
   flush() {
@@ -520,6 +564,7 @@ async function runQueuedTask(
   task: QueueTask,
   options: {
     verbose?: boolean;
+    nonInteractivePermissions?: NonInteractivePermissionPolicy;
     authCredentials?: Record<string, string>;
     authPolicy?: AuthPolicy;
     onClientAvailable?: (controller: ActiveSessionController) => void;
@@ -536,6 +581,8 @@ async function runQueuedTask(
       sessionRecordId,
       message: task.message,
       permissionMode: task.permissionMode,
+      nonInteractivePermissions:
+        task.nonInteractivePermissions ?? options.nonInteractivePermissions,
       authCredentials: options.authCredentials,
       authPolicy: options.authPolicy,
       outputFormatter,
@@ -576,12 +623,17 @@ async function runSessionPrompt(
 ): Promise<SessionSendResult> {
   const output = options.outputFormatter;
   const record = await resolveSessionRecord(options.sessionRecordId);
+  output.setContext({
+    sessionId: record.id,
+    stream: "prompt",
+  });
   const assistantSnippets: string[] = [];
 
   const client = new AcpClient({
     agentCommand: record.agentCommand,
     cwd: absolutePath(record.cwd),
     permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     verbose: options.verbose,
@@ -730,6 +782,7 @@ async function runSessionPrompt(
 type WithConnectedSessionOptions<T> = {
   sessionRecordId: string;
   permissionMode?: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   timeoutMs?: number;
@@ -754,6 +807,7 @@ async function withConnectedSession<T>(
     agentCommand: record.agentCommand,
     cwd: absolutePath(record.cwd),
     permissionMode: options.permissionMode ?? "approve-reads",
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     verbose: options.verbose,
@@ -840,6 +894,7 @@ async function withConnectedSession<T>(
 type RunSessionSetModeDirectOptions = {
   sessionRecordId: string;
   modeId: string;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   timeoutMs?: number;
@@ -852,6 +907,7 @@ type RunSessionSetConfigOptionDirectOptions = {
   sessionRecordId: string;
   configId: string;
   value: string;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   timeoutMs?: number;
@@ -865,6 +921,7 @@ async function runSessionSetModeDirect(
 ): Promise<SessionSetModeResult> {
   const result = await withConnectedSession({
     sessionRecordId: options.sessionRecordId,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     timeoutMs: options.timeoutMs,
@@ -891,6 +948,7 @@ async function runSessionSetConfigOptionDirect(
 ): Promise<SessionSetConfigOptionResult> {
   const result = await withConnectedSession({
     sessionRecordId: options.sessionRecordId,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     timeoutMs: options.timeoutMs,
@@ -919,6 +977,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
     agentCommand: options.agentCommand,
     cwd: absolutePath(options.cwd),
     permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     verbose: options.verbose,
@@ -934,6 +993,10 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
           client.createSession(absolutePath(options.cwd)),
           options.timeoutMs,
         );
+        output.setContext({
+          sessionId,
+          stream: "prompt",
+        });
         const response = await withTimeout(
           client.prompt(sessionId, options.message),
           options.timeoutMs,
@@ -959,6 +1022,7 @@ export async function createSession(
     agentCommand: options.agentCommand,
     cwd: absolutePath(options.cwd),
     permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     verbose: options.verbose,
@@ -1004,6 +1068,43 @@ export async function createSession(
   }
 }
 
+export async function ensureSession(
+  options: SessionEnsureOptions,
+): Promise<SessionEnsureResult> {
+  const cwd = absolutePath(options.cwd);
+  const gitRoot = findGitRepositoryRoot(cwd);
+  const walkBoundary = options.walkBoundary ?? gitRoot ?? cwd;
+  const existing = await findSessionByDirectoryWalk({
+    agentCommand: options.agentCommand,
+    cwd,
+    name: options.name,
+    boundary: walkBoundary,
+  });
+  if (existing) {
+    return {
+      record: existing,
+      created: false,
+    };
+  }
+
+  const record = await createSession({
+    agentCommand: options.agentCommand,
+    cwd,
+    name: options.name,
+    permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
+    authCredentials: options.authCredentials,
+    authPolicy: options.authPolicy,
+    timeoutMs: options.timeoutMs,
+    verbose: options.verbose,
+  });
+
+  return {
+    record,
+    created: true,
+  };
+}
+
 export async function sendSession(
   options: SessionSendOptions,
 ): Promise<SessionSendOutcome> {
@@ -1014,6 +1115,7 @@ export async function sendSession(
     sessionId: options.sessionId,
     message: options.message,
     permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     outputFormatter: options.outputFormatter,
     timeoutMs: options.timeoutMs,
     waitForCompletion,
@@ -1030,6 +1132,7 @@ export async function sendSession(
         sessionId: options.sessionId,
         message: options.message,
         permissionMode: options.permissionMode,
+        nonInteractivePermissions: options.nonInteractivePermissions,
         outputFormatter: options.outputFormatter,
         timeoutMs: options.timeoutMs,
         waitForCompletion,
@@ -1049,6 +1152,7 @@ export async function sendSession(
         await runSessionSetModeDirect({
           sessionRecordId: options.sessionId,
           modeId,
+          nonInteractivePermissions: options.nonInteractivePermissions,
           authCredentials: options.authCredentials,
           authPolicy: options.authPolicy,
           timeoutMs,
@@ -1064,6 +1168,7 @@ export async function sendSession(
           sessionRecordId: options.sessionId,
           configId,
           value,
+          nonInteractivePermissions: options.nonInteractivePermissions,
           authCredentials: options.authCredentials,
           authPolicy: options.authPolicy,
           timeoutMs,
@@ -1135,6 +1240,7 @@ export async function sendSession(
           sessionRecordId: options.sessionId,
           message: options.message,
           permissionMode: options.permissionMode,
+          nonInteractivePermissions: options.nonInteractivePermissions,
           authCredentials: options.authCredentials,
           authPolicy: options.authPolicy,
           outputFormatter: options.outputFormatter,
@@ -1165,6 +1271,7 @@ export async function sendSession(
         await runPromptTurn(async () => {
           await runQueuedTask(options.sessionId, task, {
             verbose: options.verbose,
+            nonInteractivePermissions: options.nonInteractivePermissions,
             authCredentials: options.authCredentials,
             authPolicy: options.authPolicy,
             onClientAvailable: setActiveController,
@@ -1217,6 +1324,7 @@ export async function setSessionMode(
   return await runSessionSetModeDirect({
     sessionRecordId: options.sessionId,
     modeId: options.modeId,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     timeoutMs: options.timeoutMs,
@@ -1246,6 +1354,7 @@ export async function setSessionConfigOption(
     sessionRecordId: options.sessionId,
     configId: options.configId,
     value: options.value,
+    nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
     timeoutMs: options.timeoutMs,

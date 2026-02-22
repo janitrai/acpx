@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
+import { PermissionPromptUnavailableError } from "../src/errors.js";
 import { resolvePermissionRequest } from "../src/permissions.js";
 
 const BASE_OPTIONS = [
@@ -73,5 +74,15 @@ test("approve-reads approves reads and denies writes", async () => {
     assert.deepEqual(writeResponse, {
       outcome: { outcome: "selected", optionId: "reject" },
     });
+  });
+});
+
+test("non-interactive policy fail throws when prompt is required", async () => {
+  await withNonTty(async () => {
+    await assert.rejects(
+      async () =>
+        await resolvePermissionRequest(makeRequest("edit"), "approve-reads", "fail"),
+      PermissionPromptUnavailableError,
+    );
   });
 });

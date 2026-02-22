@@ -34,3 +34,9 @@ export class QueueConnectionError extends AcpxOperationalError {}
 export class QueueProtocolError extends AcpxOperationalError {}
 
 export class PermissionDeniedError extends AcpxOperationalError {}
+
+export class PermissionPromptUnavailableError extends AcpxOperationalError {
+  constructor() {
+    super("Permission prompt unavailable in non-interactive mode");
+  }
+}

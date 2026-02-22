@@ -685,6 +685,7 @@ export class AcpClient {
     const response = await resolvePermissionRequest(
       params,
       this.options.permissionMode,
+      this.options.nonInteractivePermissions ?? "deny",
     );
 
     const decision = classifyPermissionDecision(params, response);

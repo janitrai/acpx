@@ -26,6 +26,7 @@ import {
   cancelSessionPrompt,
   closeSession,
   createSession,
+  ensureSession,
   findGitRepositoryRoot,
   findSession,
   findSessionByDirectoryWalk,
@@ -36,10 +37,14 @@ import {
   setSessionMode,
   sendSession,
 } from "./session.js";
+import { PermissionDeniedError, PermissionPromptUnavailableError } from "./errors.js";
 import {
   AUTH_POLICIES,
   EXIT_CODES,
+  NON_INTERACTIVE_PERMISSION_POLICIES,
   OUTPUT_FORMATS,
+  type NonInteractivePermissionPolicy,
+  type OutputErrorCode,
   type AuthPolicy,
   type OutputFormat,
   type PermissionMode,
@@ -63,6 +68,7 @@ type GlobalFlags = PermissionFlags & {
   agent?: string;
   cwd: string;
   authPolicy?: AuthPolicy;
+  nonInteractivePermissions: NonInteractivePermissionPolicy;
   timeout?: number;
   ttl: number;
   verbose?: boolean;
@@ -119,6 +125,21 @@ function parseAuthPolicy(value: string): AuthPolicy {
     );
   }
   return value as AuthPolicy;
+}
+
+function parseNonInteractivePermissionPolicy(
+  value: string,
+): NonInteractivePermissionPolicy {
+  if (
+    !NON_INTERACTIVE_PERMISSION_POLICIES.includes(
+      value as NonInteractivePermissionPolicy,
+    )
+  ) {
+    throw new InvalidArgumentError(
+      `Invalid non-interactive permission policy "${value}". Expected one of: ${NON_INTERACTIVE_PERMISSION_POLICIES.join(", ")}`,
+    );
+  }
+  return value as NonInteractivePermissionPolicy;
 }
 
 function parseTimeoutSeconds(value: string): number {
@@ -263,6 +284,11 @@ function addGlobalFlags(command: Command): Command {
       "Auto-approve read/search requests and prompt for writes",
     )
     .option("--deny-all", "Deny all permission requests")
+    .option(
+      "--non-interactive-permissions <policy>",
+      "When prompting is unavailable: deny or fail",
+      parseNonInteractivePermissionPolicy,
+    )
     .option("--format <fmt>", "Output format: text, json, quiet", parseOutputFormat)
     .option(
       "--timeout <seconds>",
@@ -337,6 +363,8 @@ function resolveGlobalFlags(command: Command, config: ResolvedAcpxConfig): Globa
     agent: opts.agent,
     cwd: opts.cwd ?? process.cwd(),
     authPolicy: opts.authPolicy ?? config.authPolicy,
+    nonInteractivePermissions:
+      opts.nonInteractivePermissions ?? config.nonInteractivePermissions,
     timeout: opts.timeout ?? config.timeoutMs,
     ttl: opts.ttl ?? config.ttlMs ?? DEFAULT_QUEUE_OWNER_TTL_MS,
     verbose: opts.verbose === true,
@@ -452,6 +480,33 @@ function printNewSessionByFormat(
   }
 
   process.stdout.write(`${record.id}\n`);
+}
+
+function printEnsuredSessionByFormat(
+  record: SessionRecord,
+  created: boolean,
+  format: OutputFormat,
+): void {
+  if (format === "json") {
+    process.stdout.write(
+      `${JSON.stringify({
+        type: "session_ensured",
+        id: record.id,
+        sessionId: record.sessionId,
+        name: record.name,
+        created,
+      })}\n`,
+    );
+    return;
+  }
+
+  if (format === "quiet") {
+    process.stdout.write(`${record.id}\n`);
+    return;
+  }
+
+  const action = created ? "created" : "existing";
+  process.stdout.write(`${record.id}\t(${action})\n`);
 }
 
 function printQueuedPromptByFormat(
@@ -582,7 +637,6 @@ async function handlePrompt(
   const globalFlags = resolveGlobalFlags(command, config);
   const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
   const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
-  const outputFormatter = createOutputFormatter(globalFlags.format);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
   const record = await findRoutedSessionOrThrow(
     agent.agentCommand,
@@ -590,6 +644,12 @@ async function handlePrompt(
     agent.cwd,
     flags.session,
   );
+  const outputFormatter = createOutputFormatter(globalFlags.format, {
+    jsonContext: {
+      sessionId: record.id,
+      stream: "prompt",
+    },
+  });
 
   printPromptSessionBanner(record, agent.cwd, globalFlags.format);
 
@@ -597,6 +657,7 @@ async function handlePrompt(
     sessionId: record.id,
     message: prompt,
     permissionMode,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     outputFormatter,
@@ -638,6 +699,7 @@ async function handleExec(
     cwd: agent.cwd,
     message: prompt,
     permissionMode,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     outputFormatter,
@@ -775,6 +837,7 @@ async function handleSetMode(
   const result = await setSessionMode({
     sessionId: record.id,
     modeId,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     timeoutMs: globalFlags.timeout,
@@ -810,6 +873,7 @@ async function handleSetConfigOption(
     sessionId: record.id,
     configId,
     value,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     timeoutMs: globalFlags.timeout,
@@ -893,6 +957,7 @@ async function handleSessionsNew(
     cwd: agent.cwd,
     name: flags.name,
     permissionMode,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     timeoutMs: globalFlags.timeout,
@@ -907,6 +972,34 @@ async function handleSessionsNew(
   }
 
   printNewSessionByFormat(created, replaced, globalFlags.format);
+}
+
+async function handleSessionsEnsure(
+  explicitAgentName: string | undefined,
+  flags: SessionsNewFlags,
+  command: Command,
+  config: ResolvedAcpxConfig,
+): Promise<void> {
+  const globalFlags = resolveGlobalFlags(command, config);
+  const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
+  const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
+  const result = await ensureSession({
+    agentCommand: agent.agentCommand,
+    cwd: agent.cwd,
+    name: flags.name,
+    permissionMode,
+    nonInteractivePermissions: globalFlags.nonInteractivePermissions,
+    authCredentials: config.auth,
+    authPolicy: globalFlags.authPolicy,
+    timeoutMs: globalFlags.timeout,
+    verbose: globalFlags.verbose,
+  });
+
+  if (result.created) {
+    printCreatedSessionBanner(result.record, agent.agentName, globalFlags.format);
+  }
+
+  printEnsuredSessionByFormat(result.record, result.created, globalFlags.format);
 }
 
 function printSessionDetailsByFormat(
@@ -1195,7 +1288,7 @@ function registerSessionsCommand(
 ): void {
   const sessionsCommand = parent
     .command("sessions")
-    .description("List, create, or close sessions for this agent");
+    .description("List, ensure, create, or close sessions for this agent");
 
   sessionsCommand.action(async function (this: Command) {
     await handleSessionsList(explicitAgentName, this, config);
@@ -1214,6 +1307,14 @@ function registerSessionsCommand(
     .option("--name <name>", "Session name", parseSessionName)
     .action(async function (this: Command, flags: SessionsNewFlags) {
       await handleSessionsNew(explicitAgentName, flags, this, config);
+    });
+
+  sessionsCommand
+    .command("ensure")
+    .description("Ensure a session exists for current cwd or ancestor")
+    .option("--name <name>", "Session name", parseSessionName)
+    .action(async function (this: Command, flags: SessionsNewFlags) {
+      await handleSessionsEnsure(explicitAgentName, flags, this, config);
     });
 
   sessionsCommand
@@ -1448,6 +1549,7 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
     if (
       token === "--cwd" ||
       token === "--auth-policy" ||
+      token === "--non-interactive-permissions" ||
       token === "--format" ||
       token === "--timeout" ||
       token === "--ttl" ||
@@ -1460,6 +1562,7 @@ function detectAgentToken(argv: string[]): AgentTokenScan {
     if (
       token.startsWith("--cwd=") ||
       token.startsWith("--auth-policy=") ||
+      token.startsWith("--non-interactive-permissions=") ||
       token.startsWith("--format=") ||
       token.startsWith("--timeout=") ||
       token.startsWith("--ttl=") ||
@@ -1507,6 +1610,47 @@ function detectInitialCwd(argv: string[]): string {
   return process.cwd();
 }
 
+function detectRequestedOutputFormat(
+  argv: string[],
+  fallback: OutputFormat,
+): OutputFormat {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--") {
+      break;
+    }
+
+    if (token === "--format") {
+      const raw = argv[index + 1];
+      if (raw && OUTPUT_FORMATS.includes(raw as OutputFormat)) {
+        return raw as OutputFormat;
+      }
+      break;
+    }
+
+    if (token.startsWith("--format=")) {
+      const raw = token.slice("--format=".length).trim();
+      if (OUTPUT_FORMATS.includes(raw as OutputFormat)) {
+        return raw as OutputFormat;
+      }
+      break;
+    }
+  }
+
+  return fallback;
+}
+
+function emitJsonErrorEvent(code: OutputErrorCode, message: string): void {
+  const formatter = createOutputFormatter("json", {
+    jsonContext: {
+      sessionId: "unknown",
+      stream: "control",
+    },
+  });
+  formatter.onError({ code, message });
+  formatter.flush();
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
   await maybeHandleSkillflag(argv, {
     skillsRoot: findSkillsRoot(import.meta.url),
@@ -1514,6 +1658,10 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   });
 
   const config = await loadResolvedConfig(detectInitialCwd(argv.slice(2)));
+  const requestedOutputFormat = detectRequestedOutputFormat(
+    argv.slice(2),
+    config.format,
+  );
   const builtInAgents = listBuiltInAgents(config.agents);
 
   const program = new Command();
@@ -1568,6 +1716,7 @@ Examples:
   acpx codex -s backend "fix the API"
   acpx codex sessions
   acpx codex sessions new --name backend
+  acpx codex sessions ensure --name backend
   acpx codex sessions close backend
   acpx codex status
   acpx config show
@@ -1592,6 +1741,9 @@ Examples:
       ) {
         process.exit(EXIT_CODES.SUCCESS);
       }
+      if (requestedOutputFormat === "json") {
+        emitJsonErrorEvent("USAGE", error.message);
+      }
       process.exit(EXIT_CODES.USAGE);
     }
 
@@ -1600,17 +1752,47 @@ Examples:
     }
 
     if (error instanceof TimeoutError) {
-      process.stderr.write(`${error.message}\n`);
+      if (requestedOutputFormat === "json") {
+        emitJsonErrorEvent("TIMEOUT", error.message);
+      } else {
+        process.stderr.write(`${error.message}\n`);
+      }
       process.exit(EXIT_CODES.TIMEOUT);
     }
 
     if (error instanceof NoSessionError) {
-      process.stderr.write(`${error.message}\n`);
+      if (requestedOutputFormat === "json") {
+        emitJsonErrorEvent("NO_SESSION", error.message);
+      } else {
+        process.stderr.write(`${error.message}\n`);
+      }
       process.exit(EXIT_CODES.NO_SESSION);
     }
 
+    if (error instanceof PermissionDeniedError) {
+      if (requestedOutputFormat === "json") {
+        emitJsonErrorEvent("PERMISSION_DENIED", error.message);
+      } else {
+        process.stderr.write(`${error.message}\n`);
+      }
+      process.exit(EXIT_CODES.PERMISSION_DENIED);
+    }
+
+    if (error instanceof PermissionPromptUnavailableError) {
+      if (requestedOutputFormat === "json") {
+        emitJsonErrorEvent("PERMISSION_PROMPT_UNAVAILABLE", error.message);
+      } else {
+        process.stderr.write(`${error.message}\n`);
+      }
+      process.exit(EXIT_CODES.PERMISSION_DENIED);
+    }
+
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
+    if (requestedOutputFormat === "json") {
+      emitJsonErrorEvent("RUNTIME", message);
+    } else {
+      process.stderr.write(`${message}\n`);
+    }
     process.exit(EXIT_CODES.ERROR);
   }
 }

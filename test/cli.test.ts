@@ -10,6 +10,8 @@ import { formatPromptSessionBannerLine, parseTtlSeconds } from "../src/cli.js";
 import type { SessionRecord } from "../src/types.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
+const MOCK_AGENT_COMMAND = `node ${JSON.stringify(MOCK_AGENT_PATH)}`;
 
 type CliRunResult = {
   code: number | null;
@@ -100,10 +102,96 @@ test("sessions new command is present in help output", async () => {
     const result = await runCli(["sessions", "--help"], homeDir);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /\bnew\b/);
+    assert.match(result.stdout, /\bensure\b/);
 
     const newHelp = await runCli(["sessions", "new", "--help"], homeDir);
     assert.equal(newHelp.code, 0, newHelp.stderr);
     assert.match(newHelp.stdout, /--name <name>/);
+
+    const ensureHelp = await runCli(["sessions", "ensure", "--help"], homeDir);
+    assert.equal(ensureHelp.code, 0, ensureHelp.stderr);
+    assert.match(ensureHelp.stdout, /--name <name>/);
+  });
+});
+
+test("sessions ensure creates when missing and returns existing on subsequent calls", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: {
+              command: MOCK_AGENT_COMMAND,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const first = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
+      homeDir,
+    );
+    assert.equal(first.code, 0, first.stderr);
+    const firstPayload = JSON.parse(first.stdout.trim()) as {
+      type: string;
+      id: string;
+      created: boolean;
+    };
+    assert.equal(firstPayload.type, "session_ensured");
+    assert.equal(firstPayload.created, true);
+
+    const second = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
+      homeDir,
+    );
+    assert.equal(second.code, 0, second.stderr);
+    const secondPayload = JSON.parse(second.stdout.trim()) as {
+      type: string;
+      id: string;
+      created: boolean;
+    };
+    assert.equal(secondPayload.type, "session_ensured");
+    assert.equal(secondPayload.created, false);
+    assert.equal(secondPayload.id, firstPayload.id);
+  });
+});
+
+test("sessions ensure resolves existing session by directory walk", async () => {
+  await withTempHome(async (homeDir) => {
+    const root = path.join(homeDir, "workspace");
+    const child = path.join(root, "packages", "app");
+    await fs.mkdir(child, { recursive: true });
+    await fs.mkdir(path.join(root, ".git"), { recursive: true });
+
+    await writeSessionRecord(homeDir, {
+      id: "parent-session",
+      sessionId: "parent-session",
+      agentCommand: "npx @zed-industries/codex-acp",
+      cwd: root,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      closed: false,
+    });
+
+    const result = await runCli(
+      ["--cwd", child, "--format", "json", "codex", "sessions", "ensure"],
+      homeDir,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout.trim()) as {
+      id: string;
+      created: boolean;
+    };
+    assert.equal(payload.id, "parent-session");
+    assert.equal(payload.created, false);
   });
 });
 
@@ -152,6 +240,29 @@ test("prompt exits with NO_SESSION when no session exists (no auto-create)", asy
         `⚠ No acpx session found \\(searched up to ${escapedCwd}\\)\\.\\nCreate one: acpx codex sessions new\\n?`,
       ),
     );
+  });
+});
+
+test("json format emits structured no-session error event", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const result = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "hello"],
+      homeDir,
+    );
+    assert.equal(result.code, 4);
+    const payload = JSON.parse(result.stdout.trim()) as {
+      type: string;
+      code: string;
+      message: string;
+      stream: string;
+    };
+    assert.equal(payload.type, "error");
+    assert.equal(payload.code, "NO_SESSION");
+    assert.equal(payload.stream, "control");
+    assert.match(payload.message, /No acpx session found/);
   });
 });
 

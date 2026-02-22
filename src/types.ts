@@ -26,6 +26,23 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 export const AUTH_POLICIES = ["skip", "fail"] as const;
 export type AuthPolicy = (typeof AUTH_POLICIES)[number];
 
+export const NON_INTERACTIVE_PERMISSION_POLICIES = ["deny", "fail"] as const;
+export type NonInteractivePermissionPolicy =
+  (typeof NON_INTERACTIVE_PERMISSION_POLICIES)[number];
+
+export const OUTPUT_STREAMS = ["prompt", "control"] as const;
+export type OutputStream = (typeof OUTPUT_STREAMS)[number];
+
+export const OUTPUT_ERROR_CODES = [
+  "NO_SESSION",
+  "TIMEOUT",
+  "PERMISSION_DENIED",
+  "PERMISSION_PROMPT_UNAVAILABLE",
+  "RUNTIME",
+  "USAGE",
+] as const;
+export type OutputErrorCode = (typeof OUTPUT_ERROR_CODES)[number];
+
 export type PermissionStats = {
   requested: number;
   approved: number;
@@ -52,18 +69,45 @@ export type ClientOperation = {
   timestamp: string;
 };
 
+export type OutputEventEnvelope = {
+  eventVersion: 1;
+  sessionId: string;
+  requestId?: string;
+  seq: number;
+  stream: OutputStream;
+};
+
+export type BaseOutputEvent = OutputEventEnvelope & {
+  timestamp: string;
+};
+
 export type OutputEvent =
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "text";
       content: string;
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "thought";
       content: string;
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "tool_call";
       toolCallId?: string;
       title?: string;
@@ -71,6 +115,11 @@ export type OutputEvent =
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "client_operation";
       method: ClientOperationMethod;
       status: ClientOperationStatus;
@@ -79,6 +128,11 @@ export type OutputEvent =
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "plan";
       entries: Array<{
         content: string;
@@ -88,19 +142,54 @@ export type OutputEvent =
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "update";
       update: string;
       timestamp: string;
     }
   | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
       type: "done";
       stopReason: StopReason;
       timestamp: string;
+    }
+  | {
+      eventVersion: 1;
+      sessionId: string;
+      requestId?: string;
+      seq: number;
+      stream: OutputStream;
+      type: "error";
+      code: OutputErrorCode;
+      message: string;
+      retryable?: boolean;
+      timestamp: string;
     };
 
+export type OutputFormatterContext = {
+  sessionId: string;
+  requestId?: string;
+  stream?: OutputStream;
+};
+
 export interface OutputFormatter {
+  setContext(context: OutputFormatterContext): void;
   onSessionUpdate(notification: SessionNotification): void;
   onClientOperation(operation: ClientOperation): void;
+  onError(params: {
+    code: OutputErrorCode;
+    message: string;
+    retryable?: boolean;
+    timestamp?: string;
+  }): void;
   onDone(stopReason: StopReason): void;
   flush(): void;
 }
@@ -109,6 +198,7 @@ export type AcpClientOptions = {
   agentCommand: string;
   cwd: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   verbose?: boolean;
@@ -169,6 +259,11 @@ export type SessionSetConfigOptionResult = {
   response: SetSessionConfigOptionResponse;
   resumed: boolean;
   loadError?: string;
+};
+
+export type SessionEnsureResult = {
+  record: SessionRecord;
+  created: boolean;
 };
 
 export type SessionEnqueueResult = {

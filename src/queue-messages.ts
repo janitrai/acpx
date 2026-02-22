@@ -3,13 +3,19 @@ import type {
   SessionNotification,
   StopReason,
 } from "@agentclientprotocol/sdk";
-import type { ClientOperation, PermissionMode, SessionSendResult } from "./types.js";
+import type {
+  ClientOperation,
+  NonInteractivePermissionPolicy,
+  PermissionMode,
+  SessionSendResult,
+} from "./types.js";
 
 export type QueueSubmitRequest = {
   type: "submit_prompt";
   requestId: string;
   message: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   timeoutMs?: number;
   waitForCompletion: boolean;
 };
@@ -115,6 +121,12 @@ function isPermissionMode(value: unknown): value is PermissionMode {
   return value === "approve-all" || value === "approve-reads" || value === "deny-all";
 }
 
+function isNonInteractivePermissionPolicy(
+  value: unknown,
+): value is NonInteractivePermissionPolicy {
+  return value === "deny" || value === "fail";
+}
+
 export function parseQueueRequest(raw: unknown): QueueRequest | null {
   const request = asRecord(raw);
   if (!request) {
@@ -132,9 +144,17 @@ export function parseQueueRequest(raw: unknown): QueueRequest | null {
       : undefined;
 
   if (request.type === "submit_prompt") {
+    const nonInteractivePermissions =
+      request.nonInteractivePermissions == null
+        ? undefined
+        : isNonInteractivePermissionPolicy(request.nonInteractivePermissions)
+          ? request.nonInteractivePermissions
+          : null;
+
     if (
       typeof request.message !== "string" ||
       !isPermissionMode(request.permissionMode) ||
+      nonInteractivePermissions === null ||
       typeof request.waitForCompletion !== "boolean"
     ) {
       return null;
@@ -145,6 +165,7 @@ export function parseQueueRequest(raw: unknown): QueueRequest | null {
       requestId: request.requestId,
       message: request.message,
       permissionMode: request.permissionMode,
+      nonInteractivePermissions,
       timeoutMs,
       waitForCompletion: request.waitForCompletion,
     };

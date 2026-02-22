@@ -17,6 +17,7 @@ test("loadResolvedConfig merges global and project config with project priority"
         {
           defaultAgent: "codex",
           defaultPermissions: "deny-all",
+          nonInteractivePermissions: "fail",
           authPolicy: "fail",
           ttl: 15,
           timeout: 30,
@@ -39,6 +40,7 @@ test("loadResolvedConfig merges global and project config with project priority"
       `${JSON.stringify(
         {
           defaultPermissions: "approve-all",
+          nonInteractivePermissions: "deny",
           authPolicy: "skip",
           ttl: 42,
           timeout: null,
@@ -61,6 +63,7 @@ test("loadResolvedConfig merges global and project config with project priority"
     const config = await loadResolvedConfig(cwd);
     assert.equal(config.defaultAgent, "codex");
     assert.equal(config.defaultPermissions, "approve-all");
+    assert.equal(config.nonInteractivePermissions, "deny");
     assert.equal(config.authPolicy, "skip");
     assert.equal(config.ttlMs, 42_000);
     assert.equal(config.timeoutMs, undefined);
@@ -91,10 +94,12 @@ test("initGlobalConfigFile creates the config once and then reports existing fil
     const payload = JSON.parse(await fs.readFile(first.path, "utf8")) as {
       defaultAgent: string;
       defaultPermissions: string;
+      nonInteractivePermissions: string;
       authPolicy: string;
     };
     assert.equal(payload.defaultAgent, "codex");
     assert.equal(payload.defaultPermissions, "approve-all");
+    assert.equal(payload.nonInteractivePermissions, "deny");
     assert.equal(payload.authPolicy, "skip");
   });
 });

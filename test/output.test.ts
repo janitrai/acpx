@@ -81,7 +81,14 @@ test("text formatter renders tool calls with input and output", () => {
 
 test("json formatter emits valid NDJSON", () => {
   const writer = new CaptureWriter();
-  const formatter = createOutputFormatter("json", { stdout: writer });
+  const formatter = createOutputFormatter("json", {
+    stdout: writer,
+    jsonContext: {
+      sessionId: "session-1",
+      requestId: "req-1",
+      stream: "prompt",
+    },
+  });
 
   formatter.onSessionUpdate(messageChunk("Hello") as never);
   formatter.onSessionUpdate(thoughtChunk("Thinking") as never);
@@ -94,6 +101,13 @@ test("json formatter emits valid NDJSON", () => {
     .filter((line) => line.length > 0);
   const parsed = lines.map((line) => JSON.parse(line));
 
+  assert.equal(parsed[0]?.eventVersion, 1);
+  assert.equal(parsed[0]?.sessionId, "session-1");
+  assert.equal(parsed[0]?.requestId, "req-1");
+  assert.equal(parsed[0]?.stream, "prompt");
+  assert.equal(parsed[0]?.seq, 0);
+  assert.equal(parsed[1]?.seq, 1);
+  assert.equal(parsed[2]?.seq, 2);
   assert.equal(parsed[0]?.type, "text");
   assert.equal(parsed[1]?.type, "thought");
   assert.equal(parsed[2]?.type, "done");
@@ -132,6 +146,38 @@ test("json formatter emits client operation NDJSON events", () => {
   assert.equal(parsed.type, "client_operation");
   assert.equal(parsed.method, "terminal/create");
   assert.equal(parsed.status, "running");
+});
+
+test("json formatter emits structured error events", () => {
+  const writer = new CaptureWriter();
+  const formatter = createOutputFormatter("json", {
+    stdout: writer,
+    jsonContext: {
+      sessionId: "session-error",
+      stream: "control",
+    },
+  });
+
+  formatter.onError({
+    code: "PERMISSION_PROMPT_UNAVAILABLE",
+    message: "Permission prompt unavailable in non-interactive mode",
+  });
+
+  const line = writer.toString().trim();
+  const parsed = JSON.parse(line) as {
+    type: string;
+    code: string;
+    message: string;
+    stream: string;
+    sessionId: string;
+    seq: number;
+  };
+  assert.equal(parsed.type, "error");
+  assert.equal(parsed.code, "PERMISSION_PROMPT_UNAVAILABLE");
+  assert.equal(parsed.message, "Permission prompt unavailable in non-interactive mode");
+  assert.equal(parsed.stream, "control");
+  assert.equal(parsed.sessionId, "session-error");
+  assert.equal(parsed.seq, 0);
 });
 
 test("quiet formatter suppresses non-text output", () => {

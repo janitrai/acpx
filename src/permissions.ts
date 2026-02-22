@@ -4,8 +4,9 @@ import {
   type RequestPermissionResponse,
   type ToolKind,
 } from "@agentclientprotocol/sdk";
+import { PermissionPromptUnavailableError } from "./errors.js";
 import { promptForPermission } from "./permission-prompt.js";
-import type { PermissionMode } from "./types.js";
+import type { NonInteractivePermissionPolicy, PermissionMode } from "./types.js";
 
 type PermissionDecision = "approved" | "denied" | "cancelled";
 
@@ -87,9 +88,14 @@ async function promptForToolPermission(
   });
 }
 
+function canPromptForPermission(): boolean {
+  return Boolean(process.stdin.isTTY && process.stderr.isTTY);
+}
+
 export async function resolvePermissionRequest(
   params: RequestPermissionRequest,
   mode: PermissionMode,
+  nonInteractivePolicy: NonInteractivePermissionPolicy = "deny",
 ): Promise<RequestPermissionResponse> {
   const options = params.options ?? [];
   if (options.length === 0) {
@@ -116,6 +122,16 @@ export async function resolvePermissionRequest(
   const kind = inferToolKind(params);
   if (isAutoApprovedReadKind(kind) && allowOption) {
     return selected(allowOption.optionId);
+  }
+
+  if (!canPromptForPermission()) {
+    if (nonInteractivePolicy === "fail") {
+      throw new PermissionPromptUnavailableError();
+    }
+    if (rejectOption) {
+      return selected(rejectOption.optionId);
+    }
+    return cancelled();
   }
 
   const approved = await promptForToolPermission(params);
