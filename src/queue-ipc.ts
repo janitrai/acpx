@@ -708,6 +708,7 @@ export type SubmitToQueueOwnerOptions = {
   permissionMode: PermissionMode;
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   outputFormatter: OutputFormatter;
+  queueErrorAlreadyEmitted?: boolean;
   timeoutMs?: number;
   waitForCompletion: boolean;
   verbose?: boolean;
@@ -830,6 +831,7 @@ async function submitToQueueOwner(
           acp: message.acp,
         });
         options.outputFormatter.flush();
+        const queueErrorAlreadyEmitted = options.queueErrorAlreadyEmitted ?? true;
         finishReject(
           new QueueConnectionError(message.message, {
             outputCode: message.code,
@@ -837,7 +839,7 @@ async function submitToQueueOwner(
             origin: message.origin ?? "queue",
             retryable: message.retryable,
             acp: message.acp,
-            outputAlreadyEmitted: true,
+            ...(queueErrorAlreadyEmitted ? { outputAlreadyEmitted: true } : {}),
           }),
         );
         return;

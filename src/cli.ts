@@ -687,6 +687,7 @@ async function handlePrompt(
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     outputFormatter,
+    queueErrorAlreadyEmitted: globalFlags.format !== "quiet",
     timeoutMs: globalFlags.timeout,
     ttlMs: globalFlags.ttl,
     verbose: globalFlags.verbose,
@@ -1743,6 +1744,9 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     argv.slice(2),
     config.format,
   );
+  if (requestedJsonStrict) {
+    (process.stderr.write as unknown as (...args: unknown[]) => boolean) = () => true;
+  }
   const builtInAgents = listBuiltInAgents(config.agents);
 
   const program = new Command();
