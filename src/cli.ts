@@ -1754,6 +1754,9 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 
   if (requestedJsonStrict) {
     program.configureOutput({
+      writeOut: () => {
+        // json-strict intentionally suppresses non-JSON stdout output.
+      },
       writeErr: () => {
         // json-strict intentionally suppresses non-JSON stderr output.
       },
@@ -1834,7 +1837,9 @@ Examples:
         defaultCode: "USAGE",
         origin: "cli",
       });
-      emitRequestedError(error, normalized, requestedOutputFormat);
+      if (requestedOutputFormat === "json") {
+        emitRequestedError(error, normalized, requestedOutputFormat);
+      }
       process.exit(exitCodeForOutputErrorCode(normalized.code));
     }
 
