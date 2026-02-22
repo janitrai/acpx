@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { PermissionPromptUnavailableError } from "../src/errors.js";
 import { TerminalManager } from "../src/terminal.js";
 
 test("terminal manager create/output/wait/release lifecycle", async () => {
@@ -106,6 +107,28 @@ test("terminal manager prompts in approve-reads mode and can deny", async () => 
       /Permission denied for terminal\/create/,
     );
     assert.equal(confirmations, 1);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("terminal manager fails when prompt is unavailable and policy is fail", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-terminal-test-"));
+  try {
+    const manager = new TerminalManager({
+      cwd: tmp,
+      permissionMode: "approve-reads",
+      nonInteractivePermissions: "fail",
+    });
+
+    await assert.rejects(
+      manager.createTerminal({
+        sessionId: "session-1",
+        command: process.execPath,
+        args: ["-e", "console.log('blocked')"],
+      }),
+      PermissionPromptUnavailableError,
+    );
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

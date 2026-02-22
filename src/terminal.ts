@@ -13,9 +13,13 @@ import type {
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
-import { PermissionDeniedError } from "./errors.js";
+import { PermissionDeniedError, PermissionPromptUnavailableError } from "./errors.js";
 import { promptForPermission } from "./permission-prompt.js";
-import type { ClientOperation, PermissionMode } from "./types.js";
+import type {
+  ClientOperation,
+  NonInteractivePermissionPolicy,
+  PermissionMode,
+} from "./types.js";
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_KILL_GRACE_MS = 1_500;
@@ -34,6 +38,7 @@ type ManagedTerminal = {
 export type TerminalManagerOptions = {
   cwd: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   onOperation?: (operation: ClientOperation) => void;
   confirmExecute?: (commandLine: string) => Promise<boolean>;
   killGraceMs?: number;
@@ -103,6 +108,10 @@ async function defaultConfirmExecute(commandLine: string): Promise<boolean> {
   });
 }
 
+function canPromptForPermission(): boolean {
+  return Boolean(process.stdin.isTTY && process.stderr.isTTY);
+}
+
 function waitMs(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, Math.max(0, ms));
@@ -112,7 +121,9 @@ function waitMs(ms: number): Promise<void> {
 export class TerminalManager {
   private readonly cwd: string;
   private readonly permissionMode: PermissionMode;
+  private readonly nonInteractivePermissions: NonInteractivePermissionPolicy;
   private readonly onOperation?: (operation: ClientOperation) => void;
+  private readonly usesDefaultConfirmExecute: boolean;
   private readonly confirmExecute: (commandLine: string) => Promise<boolean>;
   private readonly killGraceMs: number;
   private readonly terminals = new Map<string, ManagedTerminal>();
@@ -120,7 +131,9 @@ export class TerminalManager {
   constructor(options: TerminalManagerOptions) {
     this.cwd = options.cwd;
     this.permissionMode = options.permissionMode;
+    this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
     this.onOperation = options.onOperation;
+    this.usesDefaultConfirmExecute = options.confirmExecute == null;
     this.confirmExecute = options.confirmExecute ?? defaultConfirmExecute;
     this.killGraceMs = Math.max(
       0,
@@ -378,6 +391,13 @@ export class TerminalManager {
     }
     if (this.permissionMode === "deny-all") {
       return false;
+    }
+    if (
+      this.usesDefaultConfirmExecute &&
+      this.nonInteractivePermissions === "fail" &&
+      !canPromptForPermission()
+    ) {
+      throw new PermissionPromptUnavailableError();
     }
     return await this.confirmExecute(commandLine);
   }

@@ -27,7 +27,11 @@ import {
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
-import { AgentSpawnError, AuthPolicyError } from "./errors.js";
+import {
+  AgentSpawnError,
+  AuthPolicyError,
+  PermissionPromptUnavailableError,
+} from "./errors.js";
 import { FileSystemHandlers } from "./filesystem.js";
 import { classifyPermissionDecision, resolvePermissionRequest } from "./permissions.js";
 import { TerminalManager } from "./terminal.js";
@@ -254,6 +258,10 @@ export class AcpClient {
   private agentStartedAt?: string;
   private lastAgentExit?: AgentExitInfo;
   private lastKnownPid?: number;
+  private readonly promptPermissionFailures = new Map<
+    string,
+    PermissionPromptUnavailableError
+  >();
 
   constructor(options: AcpClientOptions) {
     this.options = {
@@ -266,11 +274,13 @@ export class AcpClient {
     this.filesystem = new FileSystemHandlers({
       cwd: this.options.cwd,
       permissionMode: this.options.permissionMode,
+      nonInteractivePermissions: this.options.nonInteractivePermissions,
       onOperation: emitOperation,
     });
     this.terminalManager = new TerminalManager({
       cwd: this.options.cwd,
       permissionMode: this.options.permissionMode,
+      nonInteractivePermissions: this.options.nonInteractivePermissions,
       onOperation: emitOperation,
     });
   }
@@ -498,12 +508,24 @@ export class AcpClient {
     };
 
     try {
-      return await promptPromise;
+      const response = await promptPromise;
+      const permissionFailure = this.consumePromptPermissionFailure(sessionId);
+      if (permissionFailure) {
+        throw permissionFailure;
+      }
+      return response;
+    } catch (error) {
+      const permissionFailure = this.consumePromptPermissionFailure(sessionId);
+      if (permissionFailure) {
+        throw permissionFailure;
+      }
+      throw error;
     } finally {
       if (this.activePrompt?.promise === promptPromise) {
         this.activePrompt = undefined;
       }
       this.cancellingSessionIds.delete(sessionId);
+      this.promptPermissionFailures.delete(sessionId);
     }
   }
 
@@ -597,6 +619,7 @@ export class AcpClient {
     this.suppressSessionUpdates = false;
     this.activePrompt = undefined;
     this.cancellingSessionIds.clear();
+    this.promptPermissionFailures.clear();
     this.connection = undefined;
     this.agent = undefined;
   }
@@ -682,11 +705,26 @@ export class AcpClient {
       };
     }
 
-    const response = await resolvePermissionRequest(
-      params,
-      this.options.permissionMode,
-      this.options.nonInteractivePermissions ?? "deny",
-    );
+    let response: RequestPermissionResponse;
+    try {
+      response = await resolvePermissionRequest(
+        params,
+        this.options.permissionMode,
+        this.options.nonInteractivePermissions ?? "deny",
+      );
+    } catch (error) {
+      if (error instanceof PermissionPromptUnavailableError) {
+        this.notePromptPermissionFailure(params.sessionId, error);
+        this.permissionStats.requested += 1;
+        this.permissionStats.cancelled += 1;
+        return {
+          outcome: {
+            outcome: "cancelled",
+          },
+        };
+      }
+      throw error;
+    }
 
     const decision = classifyPermissionDecision(params, response);
     this.permissionStats.requested += 1;
@@ -739,6 +777,25 @@ export class AcpClient {
     };
   }
 
+  private notePromptPermissionFailure(
+    sessionId: string,
+    error: PermissionPromptUnavailableError,
+  ): void {
+    if (!this.promptPermissionFailures.has(sessionId)) {
+      this.promptPermissionFailures.set(sessionId, error);
+    }
+  }
+
+  private consumePromptPermissionFailure(
+    sessionId: string,
+  ): PermissionPromptUnavailableError | undefined {
+    const error = this.promptPermissionFailures.get(sessionId);
+    if (error) {
+      this.promptPermissionFailures.delete(sessionId);
+    }
+    return error;
+  }
+
   private async handleReadTextFile(
     params: ReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
@@ -748,13 +805,27 @@ export class AcpClient {
   private async handleWriteTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
-    return await this.filesystem.writeTextFile(params);
+    try {
+      return await this.filesystem.writeTextFile(params);
+    } catch (error) {
+      if (error instanceof PermissionPromptUnavailableError) {
+        this.notePromptPermissionFailure(params.sessionId, error);
+      }
+      throw error;
+    }
   }
 
   private async handleCreateTerminal(
     params: CreateTerminalRequest,
   ): Promise<CreateTerminalResponse> {
-    return await this.terminalManager.createTerminal(params);
+    try {
+      return await this.terminalManager.createTerminal(params);
+    } catch (error) {
+      if (error instanceof PermissionPromptUnavailableError) {
+        this.notePromptPermissionFailure(params.sessionId, error);
+      }
+      throw error;
+    }
   }
 
   private async handleTerminalOutput(

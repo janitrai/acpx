@@ -68,6 +68,49 @@ test("integration: timeout emits structured TIMEOUT json error", async () => {
   });
 });
 
+test("integration: non-interactive fail emits structured permission error", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+    const writePath = path.join(cwd, "blocked.txt");
+
+    try {
+      const result = await runCli(
+        [
+          "--agent",
+          MOCK_AGENT_COMMAND,
+          "--approve-reads",
+          "--non-interactive-permissions",
+          "fail",
+          "--cwd",
+          cwd,
+          "--format",
+          "json",
+          "exec",
+          `write ${writePath} hello`,
+        ],
+        homeDir,
+      );
+
+      assert.equal(result.code, 5, result.stderr);
+      const payloads = result.stdout
+        .trim()
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map(
+          (line) =>
+            JSON.parse(line) as { type?: string; code?: string; stream?: string },
+        );
+      assert(payloads.length > 0, "expected at least one JSON payload");
+      const permissionError = payloads.find((payload) => payload.type === "error");
+      assert(permissionError, `expected error event in output:\n${result.stdout}`);
+      assert.equal(permissionError.code, "PERMISSION_PROMPT_UNAVAILABLE");
+      assert.equal(permissionError.stream, "control");
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 test("integration: fs/read_text_file through mock agent", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));

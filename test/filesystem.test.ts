@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { PermissionPromptUnavailableError } from "../src/errors.js";
 import { FileSystemHandlers } from "../src/filesystem.js";
 import type { ClientOperation } from "../src/types.js";
 
@@ -84,6 +85,28 @@ test("writeTextFile prompts in approve-reads mode and can deny", async () => {
       /Permission denied for fs\/write_text_file/,
     );
     assert.equal(confirmCalls, 1);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("writeTextFile fails when prompt is unavailable and policy is fail", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-fs-test-"));
+  try {
+    const handlers = new FileSystemHandlers({
+      cwd: tmp,
+      permissionMode: "approve-reads",
+      nonInteractivePermissions: "fail",
+    });
+
+    await assert.rejects(
+      handlers.writeTextFile({
+        sessionId: "session-1",
+        path: path.join(tmp, "blocked.txt"),
+        content: "blocked",
+      }),
+      PermissionPromptUnavailableError,
+    );
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

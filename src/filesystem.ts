@@ -6,9 +6,13 @@ import type {
 } from "@agentclientprotocol/sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { PermissionDeniedError } from "./errors.js";
+import { PermissionDeniedError, PermissionPromptUnavailableError } from "./errors.js";
 import { promptForPermission } from "./permission-prompt.js";
-import type { ClientOperation, PermissionMode } from "./types.js";
+import type {
+  ClientOperation,
+  NonInteractivePermissionPolicy,
+  PermissionMode,
+} from "./types.js";
 
 const WRITE_PREVIEW_MAX_LINES = 16;
 const WRITE_PREVIEW_MAX_CHARS = 1_200;
@@ -16,6 +20,7 @@ const WRITE_PREVIEW_MAX_CHARS = 1_200;
 export type FileSystemHandlersOptions = {
   cwd: string;
   permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
   onOperation?: (operation: ClientOperation) => void;
   confirmWrite?: (filePath: string, preview: string) => Promise<boolean>;
 };
@@ -59,10 +64,16 @@ async function defaultConfirmWrite(
   });
 }
 
+function canPromptForPermission(): boolean {
+  return Boolean(process.stdin.isTTY && process.stderr.isTTY);
+}
+
 export class FileSystemHandlers {
   private readonly rootDir: string;
   private readonly permissionMode: PermissionMode;
+  private readonly nonInteractivePermissions: NonInteractivePermissionPolicy;
   private readonly onOperation?: (operation: ClientOperation) => void;
+  private readonly usesDefaultConfirmWrite: boolean;
   private readonly confirmWrite: (
     filePath: string,
     preview: string,
@@ -71,7 +82,9 @@ export class FileSystemHandlers {
   constructor(options: FileSystemHandlersOptions) {
     this.rootDir = path.resolve(options.cwd);
     this.permissionMode = options.permissionMode;
+    this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
     this.onOperation = options.onOperation;
+    this.usesDefaultConfirmWrite = options.confirmWrite == null;
     this.confirmWrite = options.confirmWrite ?? defaultConfirmWrite;
   }
 
@@ -165,6 +178,13 @@ export class FileSystemHandlers {
     }
     if (this.permissionMode === "deny-all") {
       return false;
+    }
+    if (
+      this.usesDefaultConfirmWrite &&
+      this.nonInteractivePermissions === "fail" &&
+      !canPromptForPermission()
+    ) {
+      throw new PermissionPromptUnavailableError();
     }
     return await this.confirmWrite(filePath, preview);
   }
