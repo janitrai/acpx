@@ -22,6 +22,10 @@ OpenClaw will route bound Discord thread messages to ACP-backed sessions and use
 
 What is missing for production-safe orchestration is mostly machine-facing contract hardening.
 
+Canonical permanent reference for error behavior:
+
+- `docs/ACPX_ERROR_STRATEGY.md`
+
 ## Goals
 
 - Make `acpx` JSON output fully correlation-safe for orchestrators.
@@ -38,12 +42,10 @@ What is missing for production-safe orchestration is mostly machine-facing contr
 
 ## Core design decision
 
-Use a two-layer error contract:
+Use a two-layer error contract (fully specified in `docs/ACPX_ERROR_STRATEGY.md`):
 
 - preserve ACP-native error details (numeric JSON-RPC `code`, `message`, optional `data`) when available
 - expose stable `acpx` machine error codes for orchestrators
-
-This avoids fragile text parsing while keeping ACP semantics visible for precise handling.
 
 ## Required changes
 
@@ -68,76 +70,16 @@ Notes:
 
 ### 2. General structured JSON error contract
 
-In JSON mode, all fatal failures should emit a structured final `error` event before exit.
+Adopt the permanent contract in `docs/ACPX_ERROR_STRATEGY.md`:
 
-Error event shape:
-
-```json
-{
-  "type": "error",
-  "code": "NO_SESSION|TIMEOUT|PERMISSION_DENIED|PERMISSION_PROMPT_UNAVAILABLE|RUNTIME|USAGE",
-  "detailCode": "QUEUE_PROTOCOL_INVALID_JSON|QUEUE_OWNER_CLOSED|...",
-  "origin": "cli|runtime|queue|acp",
-  "message": "...",
-  "retryable": true,
-  "sessionId": "...",
-  "requestId": "...",
-  "timestamp": "...",
-  "acp": {
-    "code": -32002,
-    "message": "Resource not found: ...",
-    "data": {}
-  }
-}
-```
-
-Rules:
-
-- `code` is stable, small, and orchestrator-friendly.
-- `detailCode` is optional, more specific, and additive.
-- `origin` identifies where normalization occurred.
-- `acp` is optional and only included when there is a source ACP/JSON-RPC error.
-- Text mode behavior remains unchanged.
-- Exit codes remain unchanged.
+- stable top-level `acpx` error `code`
+- optional `detailCode` for fine-grained diagnostics (especially queue IPC)
+- optional raw ACP error payload for protocol-native failures
+- additive JSON fields, unchanged text mode and exit codes
 
 ### 3. Error normalization and mapping strategy
 
-Add a single normalization path used by CLI, runtime, and queue IPC.
-
-High-level `acpx` code mapping:
-
-- `NO_SESSION`:
-  - missing/invalid session state (for example ACP resource-not-found)
-- `TIMEOUT`:
-  - local timeout wrappers
-- `PERMISSION_DENIED`:
-  - explicit deny/cancel permission outcomes
-- `PERMISSION_PROMPT_UNAVAILABLE`:
-  - non-interactive policy is `fail` and prompt cannot be shown
-- `USAGE`:
-  - CLI argument/config usage failures
-- `RUNTIME`:
-  - everything else (spawn/runtime/protocol/queue/internal)
-
-Queue `detailCode` values (initial set):
-
-- `QUEUE_OWNER_CLOSED`
-- `QUEUE_OWNER_SHUTTING_DOWN`
-- `QUEUE_REQUEST_INVALID`
-- `QUEUE_REQUEST_PAYLOAD_INVALID_JSON`
-- `QUEUE_ACK_MISSING`
-- `QUEUE_DISCONNECTED_BEFORE_ACK`
-- `QUEUE_DISCONNECTED_BEFORE_COMPLETION`
-- `QUEUE_PROTOCOL_INVALID_JSON`
-- `QUEUE_PROTOCOL_MALFORMED_MESSAGE`
-- `QUEUE_PROTOCOL_UNEXPECTED_RESPONSE`
-- `QUEUE_NOT_ACCEPTING_REQUESTS`
-
-ACP compatibility behavior:
-
-- treat ACP `-32002` as canonical resource-not-found
-- keep compatibility fallback for legacy/adapter variants (`-32001` or known message patterns) but do not rely on message parsing as primary behavior
-- preserve raw ACP error in `acp` field whenever available
+Implement one shared normalization path consumed by CLI, runtime, and queue layers, as specified in `docs/ACPX_ERROR_STRATEGY.md`.
 
 ### 4. Explicit non-interactive permission policy
 
@@ -194,22 +136,21 @@ Ensure queued turn lifecycle emits deterministic machine stream:
 
 and on failures:
 
-- `error` with `code`, `detailCode`, and `message` (plus `acp` when relevant)
+- `error` with typed fields as defined in `docs/ACPX_ERROR_STRATEGY.md`
 
 ### 7. Cancellation semantics
 
-Align with ACP prompt-turn behavior:
+Align with ACP prompt-turn behavior per `docs/ACPX_ERROR_STRATEGY.md`:
 
 - normal cancel path is not an error
 - cancelled turns should complete with `done`/`result` and `stopReason = "cancelled"`
-- queue `error` should only be used for transport/protocol/runtime failures, not expected cancellation completion
 
 ## Backward compatibility
 
 - Text mode output remains unchanged.
 - Existing JSON consumers continue to receive `type` and existing fields.
 - New envelope fields are additive.
-- Queue error parsing should accept both old shape (`message` only) and new shape (`code/detailCode/message`) during rollout.
+- Queue error parsing should accept both old shape (`message` only) and new typed shape during rollout.
 - Exit codes unchanged.
 
 ## Implementation sketch
