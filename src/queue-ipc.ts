@@ -821,6 +821,15 @@ async function submitToQueueOwner(
           requestId: message.requestId,
           stream: "prompt",
         });
+        options.outputFormatter.onError({
+          code: message.code ?? "RUNTIME",
+          detailCode: message.detailCode,
+          origin: message.origin ?? "queue",
+          message: message.message,
+          retryable: message.retryable,
+          acp: message.acp,
+        });
+        options.outputFormatter.flush();
         finishReject(
           new QueueConnectionError(message.message, {
             outputCode: message.code,

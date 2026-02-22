@@ -289,8 +289,8 @@ export function normalizeOutputError(
 
   const acp = options.acp ?? meta.acp ?? extractAcpError(error);
   const detailCode =
-    options.detailCode ??
     meta.detailCode ??
+    options.detailCode ??
     (error instanceof AuthPolicyError || isAcpAuthRequiredPayload(acp)
       ? "AUTH_REQUIRED"
       : undefined);
@@ -298,8 +298,8 @@ export function normalizeOutputError(
     code,
     message: formatErrorMessage(error),
     detailCode,
-    origin: options.origin ?? meta.origin,
-    retryable: options.retryable ?? meta.retryable,
+    origin: meta.origin ?? options.origin,
+    retryable: meta.retryable ?? options.retryable,
     acp,
   };
 }
