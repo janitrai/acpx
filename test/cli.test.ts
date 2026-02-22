@@ -225,6 +225,30 @@ test("--auth-policy flag validates supported values", async () => {
   });
 });
 
+test("--non-interactive-permissions validates supported values", async () => {
+  await withTempHome(async (homeDir) => {
+    const ok = await runCli(
+      ["--non-interactive-permissions", "deny", "--format", "json", "sessions"],
+      homeDir,
+    );
+    assert.equal(ok.code, 0, ok.stderr);
+
+    const invalid = await runCli(
+      ["--format", "json", "--non-interactive-permissions", "bad", "sessions"],
+      homeDir,
+    );
+    assert.equal(invalid.code, 2);
+    const payload = JSON.parse(invalid.stdout.trim()) as {
+      type: string;
+      code: string;
+      message: string;
+    };
+    assert.equal(payload.type, "error");
+    assert.equal(payload.code, "USAGE");
+    assert.match(payload.message, /Invalid non-interactive permission policy/);
+  });
+});
+
 test("prompt exits with NO_SESSION when no session exists (no auto-create)", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace", "packages", "app");
