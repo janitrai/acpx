@@ -209,6 +209,17 @@ export type OutputFormatterContext = {
   stream?: OutputStream;
 };
 
+export type OutputPolicy = {
+  format: OutputFormat;
+  jsonStrict: boolean;
+  suppressNonJsonStderr: boolean;
+  queueErrorAlreadyEmitted: boolean;
+};
+
+export type OutputErrorEmissionPolicy = {
+  queueErrorAlreadyEmitted: boolean;
+};
+
 export interface OutputFormatter {
   setContext(context: OutputFormatterContext): void;
   onSessionUpdate(notification: SessionNotification): void;

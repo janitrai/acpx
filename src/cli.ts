@@ -49,6 +49,7 @@ import {
   type NonInteractivePermissionPolicy,
   type AuthPolicy,
   type OutputFormat,
+  type OutputPolicy,
   type PermissionMode,
   type SessionRecord,
 } from "./types.js";
@@ -395,6 +396,15 @@ function resolveGlobalFlags(command: Command, config: ResolvedAcpxConfig): Globa
   };
 }
 
+function resolveOutputPolicy(format: OutputFormat, jsonStrict: boolean): OutputPolicy {
+  return {
+    format,
+    jsonStrict,
+    suppressNonJsonStderr: jsonStrict,
+    queueErrorAlreadyEmitted: format !== "quiet",
+  };
+}
+
 function resolveAgentInvocation(
   explicitAgentName: string | undefined,
   globalFlags: GlobalFlags,
@@ -657,6 +667,10 @@ async function handlePrompt(
   config: ResolvedAcpxConfig,
 ): Promise<void> {
   const globalFlags = resolveGlobalFlags(command, config);
+  const outputPolicy = resolveOutputPolicy(
+    globalFlags.format,
+    globalFlags.jsonStrict === true,
+  );
   const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
   const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
@@ -666,7 +680,7 @@ async function handlePrompt(
     agent.cwd,
     flags.session,
   );
-  const outputFormatter = createOutputFormatter(globalFlags.format, {
+  const outputFormatter = createOutputFormatter(outputPolicy.format, {
     jsonContext: {
       sessionId: record.id,
       stream: "prompt",
@@ -676,8 +690,8 @@ async function handlePrompt(
   printPromptSessionBanner(
     record,
     agent.cwd,
-    globalFlags.format,
-    globalFlags.jsonStrict,
+    outputPolicy.format,
+    outputPolicy.jsonStrict,
   );
   const result = await sendSession({
     sessionId: record.id,
@@ -687,7 +701,9 @@ async function handlePrompt(
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     outputFormatter,
-    queueErrorAlreadyEmitted: globalFlags.format !== "quiet",
+    errorEmissionPolicy: {
+      queueErrorAlreadyEmitted: outputPolicy.queueErrorAlreadyEmitted,
+    },
     timeoutMs: globalFlags.timeout,
     ttlMs: globalFlags.ttl,
     verbose: globalFlags.verbose,
@@ -695,7 +711,7 @@ async function handlePrompt(
   });
 
   if ("queued" in result) {
-    printQueuedPromptByFormat(result, globalFlags.format);
+    printQueuedPromptByFormat(result, outputPolicy.format);
     return;
   }
 
@@ -716,9 +732,13 @@ async function handleExec(
   config: ResolvedAcpxConfig,
 ): Promise<void> {
   const globalFlags = resolveGlobalFlags(command, config);
+  const outputPolicy = resolveOutputPolicy(
+    globalFlags.format,
+    globalFlags.jsonStrict === true,
+  );
   const permissionMode = resolvePermissionMode(globalFlags, config.defaultPermissions);
   const prompt = await readPrompt(promptParts, flags.file, globalFlags.cwd);
-  const outputFormatter = createOutputFormatter(globalFlags.format);
+  const outputFormatter = createOutputFormatter(outputPolicy.format);
   const agent = resolveAgentInvocation(explicitAgentName, globalFlags, config);
 
   const result = await runOnce({
@@ -1720,15 +1740,32 @@ function isOutputAlreadyEmitted(error: unknown): boolean {
 function emitRequestedError(
   error: unknown,
   normalized: NormalizedOutputError,
-  outputFormat: OutputFormat,
+  outputPolicy: OutputPolicy,
 ): void {
   if (isOutputAlreadyEmitted(error)) {
     return;
   }
-  if (outputFormat === "json") {
+  if (outputPolicy.format === "json") {
     emitJsonErrorEvent(normalized);
-  } else {
+  } else if (!outputPolicy.suppressNonJsonStderr) {
     process.stderr.write(`${normalized.message}\n`);
+  }
+}
+
+async function runWithOutputPolicy<T>(
+  outputPolicy: OutputPolicy,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!outputPolicy.suppressNonJsonStderr) {
+    return await run();
+  }
+
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    return await run();
+  } finally {
+    process.stderr.write = originalWrite;
   }
 }
 
@@ -1744,9 +1781,10 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     argv.slice(2),
     config.format,
   );
-  if (requestedJsonStrict) {
-    (process.stderr.write as unknown as (...args: unknown[]) => boolean) = () => true;
-  }
+  const requestedOutputPolicy = resolveOutputPolicy(
+    requestedOutputFormat,
+    requestedJsonStrict,
+  );
   const builtInAgents = listBuiltInAgents(config.agents);
 
   const program = new Command();
@@ -1827,36 +1865,38 @@ Examples:
     throw error;
   });
 
-  try {
-    await program.parseAsync(argv);
-  } catch (error) {
-    if (error instanceof CommanderError) {
-      if (
-        error.code === "commander.helpDisplayed" ||
-        error.code === "commander.version"
-      ) {
-        process.exit(EXIT_CODES.SUCCESS);
+  await runWithOutputPolicy(requestedOutputPolicy, async () => {
+    try {
+      await program.parseAsync(argv);
+    } catch (error) {
+      if (error instanceof CommanderError) {
+        if (
+          error.code === "commander.helpDisplayed" ||
+          error.code === "commander.version"
+        ) {
+          process.exit(EXIT_CODES.SUCCESS);
+        }
+        const normalized = normalizeOutputError(error, {
+          defaultCode: "USAGE",
+          origin: "cli",
+        });
+        if (requestedOutputPolicy.format === "json") {
+          emitRequestedError(error, normalized, requestedOutputPolicy);
+        }
+        process.exit(exitCodeForOutputErrorCode(normalized.code));
       }
+
+      if (error instanceof InterruptedError) {
+        process.exit(EXIT_CODES.INTERRUPTED);
+      }
+
       const normalized = normalizeOutputError(error, {
-        defaultCode: "USAGE",
         origin: "cli",
       });
-      if (requestedOutputFormat === "json") {
-        emitRequestedError(error, normalized, requestedOutputFormat);
-      }
+      emitRequestedError(error, normalized, requestedOutputPolicy);
       process.exit(exitCodeForOutputErrorCode(normalized.code));
     }
-
-    if (error instanceof InterruptedError) {
-      process.exit(EXIT_CODES.INTERRUPTED);
-    }
-
-    const normalized = normalizeOutputError(error, {
-      origin: "cli",
-    });
-    emitRequestedError(error, normalized, requestedOutputFormat);
-    process.exit(exitCodeForOutputErrorCode(normalized.code));
-  }
+  });
 }
 
 function isCliEntrypoint(argv: string[]): boolean {

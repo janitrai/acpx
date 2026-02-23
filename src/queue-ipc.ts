@@ -22,6 +22,7 @@ import {
 } from "./queue-messages.js";
 import type {
   NonInteractivePermissionPolicy,
+  OutputErrorEmissionPolicy,
   OutputFormatter,
   PermissionMode,
   SessionEnqueueResult,
@@ -708,7 +709,7 @@ export type SubmitToQueueOwnerOptions = {
   permissionMode: PermissionMode;
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   outputFormatter: OutputFormatter;
-  queueErrorAlreadyEmitted?: boolean;
+  errorEmissionPolicy?: OutputErrorEmissionPolicy;
   timeoutMs?: number;
   waitForCompletion: boolean;
   verbose?: boolean;
@@ -831,7 +832,8 @@ async function submitToQueueOwner(
           acp: message.acp,
         });
         options.outputFormatter.flush();
-        const queueErrorAlreadyEmitted = options.queueErrorAlreadyEmitted ?? true;
+        const queueErrorAlreadyEmitted =
+          options.errorEmissionPolicy?.queueErrorAlreadyEmitted ?? true;
         finishReject(
           new QueueConnectionError(message.message, {
             outputCode: message.code,

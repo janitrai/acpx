@@ -48,6 +48,7 @@ import type {
   AuthPolicy,
   ClientOperation,
   NonInteractivePermissionPolicy,
+  OutputErrorEmissionPolicy,
   OutputErrorAcpPayload,
   OutputErrorCode,
   OutputErrorOrigin,
@@ -117,7 +118,7 @@ export type SessionSendOptions = {
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
-  queueErrorAlreadyEmitted?: boolean;
+  errorEmissionPolicy?: OutputErrorEmissionPolicy;
   verbose?: boolean;
   waitForCompletion?: boolean;
   ttlMs?: number;
@@ -1104,7 +1105,7 @@ export async function sendSession(
     permissionMode: options.permissionMode,
     nonInteractivePermissions: options.nonInteractivePermissions,
     outputFormatter: options.outputFormatter,
-    queueErrorAlreadyEmitted: options.queueErrorAlreadyEmitted,
+    errorEmissionPolicy: options.errorEmissionPolicy,
     timeoutMs: options.timeoutMs,
     waitForCompletion,
     verbose: options.verbose,
@@ -1122,7 +1123,7 @@ export async function sendSession(
         permissionMode: options.permissionMode,
         nonInteractivePermissions: options.nonInteractivePermissions,
         outputFormatter: options.outputFormatter,
-        queueErrorAlreadyEmitted: options.queueErrorAlreadyEmitted,
+        errorEmissionPolicy: options.errorEmissionPolicy,
         timeoutMs: options.timeoutMs,
         waitForCompletion,
         verbose: options.verbose,

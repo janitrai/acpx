@@ -370,6 +370,79 @@ test("queued prompt failures emit exactly one JSON error event", async () => {
   });
 });
 
+test("queued prompt failures remain visible in quiet mode", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: {
+              command: MOCK_AGENT_COMMAND,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const session = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "sessions", "new"],
+      homeDir,
+    );
+    assert.equal(session.code, 0, session.stderr);
+
+    const blocker = spawn(
+      process.execPath,
+      [CLI_PATH, "--cwd", cwd, "codex", "prompt", "sleep 1500"],
+      {
+        env: { ...process.env, HOME: homeDir },
+        stdio: ["ignore", "ignore", "ignore"],
+      },
+    );
+
+    try {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 200);
+      });
+
+      const writeResult = await runCli(
+        [
+          "--cwd",
+          cwd,
+          "--format",
+          "quiet",
+          "--non-interactive-permissions",
+          "fail",
+          "codex",
+          "prompt",
+          `write ${path.join(cwd, "x.txt")} hi`,
+        ],
+        homeDir,
+      );
+
+      assert.equal(writeResult.code, 5);
+      assert.equal(writeResult.stdout.trim(), "");
+      assert.match(
+        writeResult.stderr,
+        /Permission prompt unavailable in non-interactive mode/,
+      );
+    } finally {
+      if (blocker.exitCode === null) {
+        blocker.kill("SIGKILL");
+      }
+      await new Promise<void>((resolve) => {
+        blocker.once("close", () => resolve());
+      });
+    }
+  });
+});
+
 test("--json-strict suppresses session banners on stderr", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
