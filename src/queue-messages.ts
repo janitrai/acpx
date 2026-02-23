@@ -219,7 +219,7 @@ export function parseQueueRequest(raw: unknown): QueueRequest | null {
       permissionMode: request.permissionMode,
       nonInteractivePermissions,
       timeoutMs,
-      suppressSdkConsoleErrors,
+      ...(suppressSdkConsoleErrors !== undefined ? { suppressSdkConsoleErrors } : {}),
       waitForCompletion: request.waitForCompletion,
     };
   }
