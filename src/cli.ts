@@ -402,6 +402,7 @@ function resolveOutputPolicy(format: OutputFormat, jsonStrict: boolean): OutputP
     jsonStrict,
     suppressNonJsonStderr: jsonStrict,
     queueErrorAlreadyEmitted: format !== "quiet",
+    suppressSdkConsoleErrors: jsonStrict,
   };
 }
 
@@ -704,6 +705,7 @@ async function handlePrompt(
     errorEmissionPolicy: {
       queueErrorAlreadyEmitted: outputPolicy.queueErrorAlreadyEmitted,
     },
+    suppressSdkConsoleErrors: outputPolicy.suppressSdkConsoleErrors,
     timeoutMs: globalFlags.timeout,
     ttlMs: globalFlags.ttl,
     verbose: globalFlags.verbose,
@@ -750,6 +752,7 @@ async function handleExec(
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
     outputFormatter,
+    suppressSdkConsoleErrors: outputPolicy.suppressSdkConsoleErrors,
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
@@ -1753,26 +1756,10 @@ function emitRequestedError(
 }
 
 async function runWithOutputPolicy<T>(
-  outputPolicy: OutputPolicy,
+  _outputPolicy: OutputPolicy,
   run: () => Promise<T>,
 ): Promise<T> {
-  if (!outputPolicy.suppressNonJsonStderr) {
-    return await run();
-  }
-
-  if (process.stdin.isTTY && process.stderr.isTTY) {
-    // Keep interactive prompts visible in TTY sessions. json-strict stderr
-    // suppression is only enforced in non-interactive runs.
-    return await run();
-  }
-
-  const originalWrite = process.stderr.write;
-  process.stderr.write = (() => true) as typeof process.stderr.write;
-  try {
-    return await run();
-  } finally {
-    process.stderr.write = originalWrite;
-  }
+  return await run();
 }
 
 export async function main(argv: string[] = process.argv): Promise<void> {

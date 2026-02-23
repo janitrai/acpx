@@ -96,6 +96,7 @@ export type RunOnceOptions = {
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
+  suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
 } & TimedRunOptions;
 
@@ -119,6 +120,7 @@ export type SessionSendOptions = {
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
   errorEmissionPolicy?: OutputErrorEmissionPolicy;
+  suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
   waitForCompletion?: boolean;
   ttlMs?: number;
@@ -246,6 +248,7 @@ type RunSessionPromptOptions = {
   authPolicy?: AuthPolicy;
   outputFormatter: OutputFormatter;
   timeoutMs?: number;
+  suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
   onClientAvailable?: (controller: ActiveSessionController) => void;
   onClientClosed?: () => void;
@@ -547,6 +550,7 @@ async function runQueuedTask(
     nonInteractivePermissions?: NonInteractivePermissionPolicy;
     authCredentials?: Record<string, string>;
     authPolicy?: AuthPolicy;
+    suppressSdkConsoleErrors?: boolean;
     onClientAvailable?: (controller: ActiveSessionController) => void;
     onClientClosed?: () => void;
     onPromptActive?: () => Promise<void> | void;
@@ -567,6 +571,8 @@ async function runQueuedTask(
       authPolicy: options.authPolicy,
       outputFormatter,
       timeoutMs: task.timeoutMs,
+      suppressSdkConsoleErrors:
+        task.suppressSdkConsoleErrors ?? options.suppressSdkConsoleErrors,
       verbose: options.verbose,
       onClientAvailable: options.onClientAvailable,
       onClientClosed: options.onClientClosed,
@@ -624,6 +630,7 @@ async function runSessionPrompt(
     nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
+    suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     verbose: options.verbose,
     onSessionUpdate: (notification) => {
       output.onSessionUpdate(notification);
@@ -968,6 +975,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
     nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
+    suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     verbose: options.verbose,
     onSessionUpdate: (notification) => output.onSessionUpdate(notification),
     onClientOperation: (operation) => output.onClientOperation(operation),
@@ -1107,6 +1115,7 @@ export async function sendSession(
     outputFormatter: options.outputFormatter,
     errorEmissionPolicy: options.errorEmissionPolicy,
     timeoutMs: options.timeoutMs,
+    suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     waitForCompletion,
     verbose: options.verbose,
   });
@@ -1125,6 +1134,7 @@ export async function sendSession(
         outputFormatter: options.outputFormatter,
         errorEmissionPolicy: options.errorEmissionPolicy,
         timeoutMs: options.timeoutMs,
+        suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
         waitForCompletion,
         verbose: options.verbose,
       });
@@ -1235,6 +1245,7 @@ export async function sendSession(
           authPolicy: options.authPolicy,
           outputFormatter: options.outputFormatter,
           timeoutMs: options.timeoutMs,
+          suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
           verbose: options.verbose,
           onClientAvailable: setActiveController,
           onClientClosed: clearActiveController,
@@ -1264,6 +1275,7 @@ export async function sendSession(
             nonInteractivePermissions: options.nonInteractivePermissions,
             authCredentials: options.authCredentials,
             authPolicy: options.authPolicy,
+            suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
             onClientAvailable: setActiveController,
             onClientClosed: clearActiveController,
             onPromptActive: async () => {
