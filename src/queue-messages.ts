@@ -24,6 +24,7 @@ export type QueueSubmitRequest = {
   permissionMode: PermissionMode;
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   timeoutMs?: number;
+  suppressSdkConsoleErrors?: boolean;
   waitForCompletion: boolean;
 };
 
@@ -194,11 +195,18 @@ export function parseQueueRequest(raw: unknown): QueueRequest | null {
         : isNonInteractivePermissionPolicy(request.nonInteractivePermissions)
           ? request.nonInteractivePermissions
           : null;
+    const suppressSdkConsoleErrors =
+      request.suppressSdkConsoleErrors == null
+        ? undefined
+        : typeof request.suppressSdkConsoleErrors === "boolean"
+          ? request.suppressSdkConsoleErrors
+          : null;
 
     if (
       typeof request.message !== "string" ||
       !isPermissionMode(request.permissionMode) ||
       nonInteractivePermissions === null ||
+      suppressSdkConsoleErrors === null ||
       typeof request.waitForCompletion !== "boolean"
     ) {
       return null;
@@ -211,6 +219,7 @@ export function parseQueueRequest(raw: unknown): QueueRequest | null {
       permissionMode: request.permissionMode,
       nonInteractivePermissions,
       timeoutMs,
+      suppressSdkConsoleErrors,
       waitForCompletion: request.waitForCompletion,
     };
   }

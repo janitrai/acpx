@@ -214,6 +214,7 @@ export type OutputPolicy = {
   jsonStrict: boolean;
   suppressNonJsonStderr: boolean;
   queueErrorAlreadyEmitted: boolean;
+  suppressSdkConsoleErrors: boolean;
 };
 
 export type OutputErrorEmissionPolicy = {
@@ -244,6 +245,7 @@ export type AcpClientOptions = {
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
+  suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
   onSessionUpdate?: (notification: SessionNotification) => void;
   onClientOperation?: (operation: ClientOperation) => void;

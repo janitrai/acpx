@@ -155,6 +155,7 @@ export type QueueTask = {
   permissionMode: PermissionMode;
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   timeoutMs?: number;
+  suppressSdkConsoleErrors?: boolean;
   waitForCompletion: boolean;
   send: (message: QueueOwnerMessage) => void;
   close: () => void;
@@ -658,6 +659,7 @@ export class SessionQueueOwner {
         permissionMode: request.permissionMode,
         nonInteractivePermissions: request.nonInteractivePermissions,
         timeoutMs: request.timeoutMs,
+        suppressSdkConsoleErrors: request.suppressSdkConsoleErrors,
         waitForCompletion: request.waitForCompletion,
         send: (message) => {
           writeQueueMessage(socket, message);
@@ -711,6 +713,7 @@ export type SubmitToQueueOwnerOptions = {
   outputFormatter: OutputFormatter;
   errorEmissionPolicy?: OutputErrorEmissionPolicy;
   timeoutMs?: number;
+  suppressSdkConsoleErrors?: boolean;
   waitForCompletion: boolean;
   verbose?: boolean;
 };
@@ -733,6 +736,7 @@ async function submitToQueueOwner(
     permissionMode: options.permissionMode,
     nonInteractivePermissions: options.nonInteractivePermissions,
     timeoutMs: options.timeoutMs,
+    suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     waitForCompletion: options.waitForCompletion,
   };
 

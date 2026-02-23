@@ -79,6 +79,28 @@ export type AgentLifecycleSnapshot = {
   lastExit?: AgentExitInfo;
 };
 
+type ConsoleErrorMethod = typeof console.error;
+
+function shouldSuppressSdkConsoleError(args: unknown[]): boolean {
+  if (args.length === 0) {
+    return false;
+  }
+  return typeof args[0] === "string" && args[0] === "Error handling request";
+}
+
+function installSdkConsoleErrorSuppression(): () => void {
+  const originalConsoleError: ConsoleErrorMethod = console.error;
+  console.error = (...args: unknown[]) => {
+    if (shouldSuppressSdkConsoleError(args)) {
+      return;
+    }
+    originalConsoleError(...args);
+  };
+  return () => {
+    console.error = originalConsoleError;
+  };
+}
+
 function isoNow(): string {
   return new Date().toISOString();
 }
@@ -492,15 +514,25 @@ export class AcpClient {
 
   async prompt(sessionId: string, text: string): Promise<PromptResponse> {
     const connection = this.getConnection();
-    const promptPromise = connection.prompt({
-      sessionId,
-      prompt: [
-        {
-          type: "text",
-          text,
-        },
-      ],
-    });
+    const restoreConsoleError = this.options.suppressSdkConsoleErrors
+      ? installSdkConsoleErrorSuppression()
+      : undefined;
+
+    let promptPromise: Promise<PromptResponse>;
+    try {
+      promptPromise = connection.prompt({
+        sessionId,
+        prompt: [
+          {
+            type: "text",
+            text,
+          },
+        ],
+      });
+    } catch (error) {
+      restoreConsoleError?.();
+      throw error;
+    }
 
     this.activePrompt = {
       sessionId,
@@ -521,6 +553,7 @@ export class AcpClient {
       }
       throw error;
     } finally {
+      restoreConsoleError?.();
       if (this.activePrompt?.promise === promptPromise) {
         this.activePrompt = undefined;
       }
