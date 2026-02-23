@@ -1821,6 +1821,11 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     promptParts: string[],
   ) {
     if (promptParts.length === 0 && process.stdin.isTTY) {
+      if (requestedJsonStrict) {
+        throw new InvalidArgumentError(
+          "Prompt is required (pass as argument, --file, or pipe via stdin)",
+        );
+      }
       this.outputHelp();
       return;
     }

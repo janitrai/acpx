@@ -247,8 +247,7 @@ export function isAcpResourceNotFoundError(error: unknown): boolean {
     message.includes("resource_not_found") ||
     message.includes("resource not found") ||
     message.includes("session not found") ||
-    message.includes("unknown session") ||
-    message.includes("invalid session")
+    message.includes("unknown session")
   );
 }
 
