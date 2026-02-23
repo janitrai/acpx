@@ -163,6 +163,19 @@ Align with ACP prompt-turn behavior per `docs/ACPX_ERROR_STRATEGY.md`:
 - normal cancel path is not an error
 - cancelled turns should complete with `done`/`result` and `stopReason = "cancelled"`
 
+### 8. Output and error-emission ownership refactor
+
+Current error/output behavior is spread across CLI/runtime/queue/client layers, which causes recurring regressions (duplicate errors, missing errors, and strict-mode leakage).
+
+Add one ownership boundary for emission policy:
+
+- define a single resolved output policy from CLI flags (`format`, `jsonStrict`, `verbose`)
+- route all final error emission decisions through one policy path
+- keep queue/runtime focused on producing typed errors, not deciding fallback emission behavior
+- replace ad-hoc emission markers with explicit policy-driven behavior for queued failures
+- enforce `json-strict` channel guarantees for runtime failures, not only Commander output
+- guarantee non-silent non-zero exits in non-JSON modes, including queued failure paths
+
 ## Backward compatibility
 
 - Text mode output remains unchanged.
@@ -208,6 +221,7 @@ Primary files:
 - centralized error normalization
 - queue failure typing cleanup (typed queue codes, not message-only)
 - compatibility fallback for legacy ACP resource-not-found variants
+- output/error emission ownership refactor (single policy path across CLI/runtime/queue/client)
 
 ### Phase 3 (polish)
 
@@ -237,6 +251,9 @@ Regression tests:
 
 - text mode snapshots unchanged
 - existing queue behavior unchanged for non-JSON mode
+- output-policy matrix:
+- `text|quiet|json` x `jsonStrict on|off` x `direct|queued` failure paths
+- assert no duplicate error emission, no missing terminal diagnostics, and no non-JSON leakage in strict mode
 
 ## Acceptance criteria
 
@@ -249,3 +266,4 @@ Regression tests:
 - non-interactive permission behavior is explicitly configurable
 - queue failures include machine-readable typed error fields (not message-only)
 - ACP error details are preserved when available
+- error emission behavior is policy-consistent across direct and queued failures (no duplicates, no silent non-zero exits)
