@@ -36,11 +36,11 @@
     "coding-agent",
     "ai"
   ],
-  "author": "Janitr AI",
+  "author": "",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/janitrai/acpx.git"
+    "url": "git+https://github.com/openclaw/acpx.git"
   },
   "engines": {
     "node": ">=18"
