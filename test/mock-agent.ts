@@ -199,6 +199,53 @@ function parseOptionValue(args: string[], index: number, flag: string): string {
   return value.trim();
 }
 
+type MetaFlagTarget = "newSessionMeta" | "loadSessionMeta";
+
+type MetaFlagSpec = {
+  target: MetaFlagTarget;
+  key: string;
+  supportsLoadSession?: boolean;
+};
+
+const META_FLAG_SPECS: Record<string, MetaFlagSpec> = {
+  "--runtime-session-id": {
+    target: "newSessionMeta",
+    key: "runtimeSessionId",
+  },
+  "--provider-session-id": {
+    target: "newSessionMeta",
+    key: "providerSessionId",
+  },
+  "--codex-session-id": {
+    target: "newSessionMeta",
+    key: "codexSessionId",
+  },
+  "--claude-session-id": {
+    target: "newSessionMeta",
+    key: "claudeSessionId",
+  },
+  "--load-runtime-session-id": {
+    target: "loadSessionMeta",
+    key: "runtimeSessionId",
+    supportsLoadSession: true,
+  },
+  "--load-provider-session-id": {
+    target: "loadSessionMeta",
+    key: "providerSessionId",
+    supportsLoadSession: true,
+  },
+  "--load-codex-session-id": {
+    target: "loadSessionMeta",
+    key: "codexSessionId",
+    supportsLoadSession: true,
+  },
+  "--load-claude-session-id": {
+    target: "loadSessionMeta",
+    key: "claudeSessionId",
+    supportsLoadSession: true,
+  },
+};
+
 function parseMockAgentOptions(argv: string[]): MockAgentOptions {
   const newSessionMeta: Record<string, string> = {};
   const loadSessionMeta: Record<string, string> = {};
@@ -212,54 +259,17 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
       continue;
     }
 
-    if (token === "--runtime-session-id") {
-      newSessionMeta.runtimeSessionId = parseOptionValue(argv, index + 1, token);
-      index += 1;
-      continue;
-    }
-
-    if (token === "--provider-session-id") {
-      newSessionMeta.providerSessionId = parseOptionValue(argv, index + 1, token);
-      index += 1;
-      continue;
-    }
-
-    if (token === "--codex-session-id") {
-      newSessionMeta.codexSessionId = parseOptionValue(argv, index + 1, token);
-      index += 1;
-      continue;
-    }
-
-    if (token === "--claude-session-id") {
-      newSessionMeta.claudeSessionId = parseOptionValue(argv, index + 1, token);
-      index += 1;
-      continue;
-    }
-
-    if (token === "--load-runtime-session-id") {
-      loadSessionMeta.runtimeSessionId = parseOptionValue(argv, index + 1, token);
-      supportsLoadSession = true;
-      index += 1;
-      continue;
-    }
-
-    if (token === "--load-provider-session-id") {
-      loadSessionMeta.providerSessionId = parseOptionValue(argv, index + 1, token);
-      supportsLoadSession = true;
-      index += 1;
-      continue;
-    }
-
-    if (token === "--load-codex-session-id") {
-      loadSessionMeta.codexSessionId = parseOptionValue(argv, index + 1, token);
-      supportsLoadSession = true;
-      index += 1;
-      continue;
-    }
-
-    if (token === "--load-claude-session-id") {
-      loadSessionMeta.claudeSessionId = parseOptionValue(argv, index + 1, token);
-      supportsLoadSession = true;
+    const metaFlag = META_FLAG_SPECS[token];
+    if (metaFlag) {
+      const value = parseOptionValue(argv, index + 1, token);
+      if (metaFlag.target === "newSessionMeta") {
+        newSessionMeta[metaFlag.key] = value;
+      } else {
+        loadSessionMeta[metaFlag.key] = value;
+      }
+      if (metaFlag.supportsLoadSession) {
+        supportsLoadSession = true;
+      }
       index += 1;
       continue;
     }

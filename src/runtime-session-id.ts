@@ -5,6 +5,15 @@ const RUNTIME_SESSION_ID_META_KEYS = [
   "claudeSessionId",
 ] as const;
 
+export function normalizeRuntimeSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function asMetaRecord(meta: unknown): Record<string, unknown> | undefined {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
     return undefined;
@@ -19,14 +28,9 @@ export function extractRuntimeSessionId(meta: unknown): string | undefined {
   }
 
   for (const key of RUNTIME_SESSION_ID_META_KEYS) {
-    const value = record[key];
-    if (typeof value !== "string") {
-      continue;
-    }
-
-    const trimmed = value.trim();
-    if (trimmed.length > 0) {
-      return trimmed;
+    const normalized = normalizeRuntimeSessionId(record[key]);
+    if (normalized) {
+      return normalized;
     }
   }
 

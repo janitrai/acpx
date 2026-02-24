@@ -98,6 +98,33 @@ test("listSessions preserves optional runtimeSessionId", async () => {
   });
 });
 
+test("listSessions ignores invalid optional runtimeSessionId values", async () => {
+  await withTempHome(async (homeDir) => {
+    const session = await loadSessionModule();
+    const cwd = path.join(homeDir, "workspace");
+    const id = "runtime-meta-invalid";
+
+    const filePath = sessionFilePath(homeDir, id);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+    const invalidRecord = {
+      ...makeSessionRecord({
+        id,
+        sessionId: id,
+        agentCommand: "agent-a",
+        cwd,
+      }),
+      runtimeSessionId: 123,
+    };
+    await fs.writeFile(filePath, `${JSON.stringify(invalidRecord, null, 2)}\n`, "utf8");
+
+    const sessions = await session.listSessions();
+    const record = sessions.find((entry) => entry.id === id);
+    assert.ok(record);
+    assert.equal(record.runtimeSessionId, undefined);
+  });
+});
+
 test("findSession matches by agent/cwd and by agent/cwd/name", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();

@@ -202,19 +202,33 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
+
+    const runtimeScenarios = [
+      {
+        agentName: "codex",
+        command: MOCK_CODEX_AGENT_WITH_RUNTIME_SESSION_ID,
+        expectedRuntimeSessionId: "codex-runtime-session",
+      },
+      {
+        agentName: "claude",
+        command: MOCK_CLAUDE_AGENT_WITH_RUNTIME_SESSION_ID,
+        expectedRuntimeSessionId: "claude-runtime-session",
+      },
+    ] as const;
+
+    const agentsConfig = Object.fromEntries(
+      runtimeScenarios.map((scenario) => [
+        scenario.agentName,
+        { command: scenario.command },
+      ]),
+    );
+
     await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
     await fs.writeFile(
       path.join(homeDir, ".acpx", "config.json"),
       `${JSON.stringify(
         {
-          agents: {
-            codex: {
-              command: MOCK_CODEX_AGENT_WITH_RUNTIME_SESSION_ID,
-            },
-            claude: {
-              command: MOCK_CLAUDE_AGENT_WITH_RUNTIME_SESSION_ID,
-            },
-          },
+          agents: agentsConfig,
         },
         null,
         2,
@@ -222,77 +236,43 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
       "utf8",
     );
 
-    const codexCreated = await runCli(
-      ["--cwd", cwd, "--format", "json", "codex", "sessions", "new"],
-      homeDir,
-    );
-    assert.equal(codexCreated.code, 0, codexCreated.stderr);
-    const codexCreatedPayload = JSON.parse(codexCreated.stdout.trim()) as {
-      type: string;
-      runtimeSessionId?: string;
-    };
-    assert.equal(codexCreatedPayload.type, "session_created");
-    assert.equal(codexCreatedPayload.runtimeSessionId, "codex-runtime-session");
+    for (const scenario of runtimeScenarios) {
+      const created = await runCli(
+        ["--cwd", cwd, "--format", "json", scenario.agentName, "sessions", "new"],
+        homeDir,
+      );
+      assert.equal(created.code, 0, created.stderr);
+      const createdPayload = JSON.parse(created.stdout.trim()) as {
+        type: string;
+        runtimeSessionId?: string;
+      };
+      assert.equal(createdPayload.type, "session_created");
+      assert.equal(createdPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
 
-    const codexEnsured = await runCli(
-      ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
-      homeDir,
-    );
-    assert.equal(codexEnsured.code, 0, codexEnsured.stderr);
-    const codexEnsuredPayload = JSON.parse(codexEnsured.stdout.trim()) as {
-      type: string;
-      created: boolean;
-      runtimeSessionId?: string;
-    };
-    assert.equal(codexEnsuredPayload.type, "session_ensured");
-    assert.equal(codexEnsuredPayload.created, false);
-    assert.equal(codexEnsuredPayload.runtimeSessionId, "codex-runtime-session");
+      const ensured = await runCli(
+        ["--cwd", cwd, "--format", "json", scenario.agentName, "sessions", "ensure"],
+        homeDir,
+      );
+      assert.equal(ensured.code, 0, ensured.stderr);
+      const ensuredPayload = JSON.parse(ensured.stdout.trim()) as {
+        type: string;
+        created: boolean;
+        runtimeSessionId?: string;
+      };
+      assert.equal(ensuredPayload.type, "session_ensured");
+      assert.equal(ensuredPayload.created, false);
+      assert.equal(ensuredPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
 
-    const codexStatus = await runCli(
-      ["--cwd", cwd, "--format", "json", "codex", "status"],
-      homeDir,
-    );
-    assert.equal(codexStatus.code, 0, codexStatus.stderr);
-    const codexStatusPayload = JSON.parse(codexStatus.stdout.trim()) as {
-      runtimeSessionId?: string;
-    };
-    assert.equal(codexStatusPayload.runtimeSessionId, "codex-runtime-session");
-
-    const claudeCreated = await runCli(
-      ["--cwd", cwd, "--format", "json", "claude", "sessions", "new"],
-      homeDir,
-    );
-    assert.equal(claudeCreated.code, 0, claudeCreated.stderr);
-    const claudeCreatedPayload = JSON.parse(claudeCreated.stdout.trim()) as {
-      type: string;
-      runtimeSessionId?: string;
-    };
-    assert.equal(claudeCreatedPayload.type, "session_created");
-    assert.equal(claudeCreatedPayload.runtimeSessionId, "claude-runtime-session");
-
-    const claudeEnsured = await runCli(
-      ["--cwd", cwd, "--format", "json", "claude", "sessions", "ensure"],
-      homeDir,
-    );
-    assert.equal(claudeEnsured.code, 0, claudeEnsured.stderr);
-    const claudeEnsuredPayload = JSON.parse(claudeEnsured.stdout.trim()) as {
-      type: string;
-      created: boolean;
-      runtimeSessionId?: string;
-    };
-    assert.equal(claudeEnsuredPayload.type, "session_ensured");
-    assert.equal(claudeEnsuredPayload.created, false);
-    assert.equal(claudeEnsuredPayload.runtimeSessionId, "claude-runtime-session");
-
-    const claudeStatus = await runCli(
-      ["--cwd", cwd, "--format", "json", "claude", "status"],
-      homeDir,
-    );
-    assert.equal(claudeStatus.code, 0, claudeStatus.stderr);
-    const claudeStatusPayload = JSON.parse(claudeStatus.stdout.trim()) as {
-      runtimeSessionId?: string;
-    };
-    assert.equal(claudeStatusPayload.runtimeSessionId, "claude-runtime-session");
+      const status = await runCli(
+        ["--cwd", cwd, "--format", "json", scenario.agentName, "status"],
+        homeDir,
+      );
+      assert.equal(status.code, 0, status.stderr);
+      const statusPayload = JSON.parse(status.stdout.trim()) as {
+        runtimeSessionId?: string;
+      };
+      assert.equal(statusPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
+    }
   });
 });
 

@@ -41,6 +41,7 @@ import {
   setSessionMode,
   sendSession,
 } from "./session.js";
+import { normalizeRuntimeSessionId } from "./runtime-session-id.js";
 import {
   AUTH_POLICIES,
   EXIT_CODES,
@@ -485,16 +486,12 @@ function printClosedSessionByFormat(record: SessionRecord, format: OutputFormat)
 function runtimeSessionIdPayload(runtimeSessionId: string | undefined): {
   runtimeSessionId?: string;
 } {
-  if (typeof runtimeSessionId !== "string") {
+  const normalized = normalizeRuntimeSessionId(runtimeSessionId);
+  if (!normalized) {
     return {};
   }
 
-  const trimmed = runtimeSessionId.trim();
-  if (trimmed.length === 0) {
-    return {};
-  }
-
-  return { runtimeSessionId: trimmed };
+  return { runtimeSessionId: normalized };
 }
 
 function printNewSessionByFormat(

@@ -31,6 +31,7 @@ import {
   trySubmitToRunningOwner,
   waitMs,
 } from "./queue-ipc.js";
+import { normalizeRuntimeSessionId } from "./runtime-session-id.js";
 import {
   DEFAULT_HISTORY_LIMIT,
   absolutePath,
@@ -456,16 +457,12 @@ function reconcileRuntimeSessionId(
   record: SessionRecord,
   runtimeSessionId: string | undefined,
 ): void {
-  if (typeof runtimeSessionId !== "string") {
+  const normalized = normalizeRuntimeSessionId(runtimeSessionId);
+  if (!normalized) {
     return;
   }
 
-  const trimmed = runtimeSessionId.trim();
-  if (trimmed.length === 0) {
-    return;
-  }
-
-  record.runtimeSessionId = trimmed;
+  record.runtimeSessionId = normalized;
 }
 
 function shouldFallbackToNewSession(error: unknown): boolean {
