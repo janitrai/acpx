@@ -384,7 +384,7 @@ test("prompt reconciles agentSessionId from loadSession metadata", async () => {
     });
 
     const prompt = await runCli(
-      ["--cwd", cwd, "--ttl", "0.01", "codex", "prompt", "echo hello"],
+      ["--cwd", cwd, "--ttl", "1", "codex", "prompt", "echo hello"],
       homeDir,
     );
     assert.equal(prompt.code, 0, prompt.stderr);
@@ -435,7 +435,7 @@ test("prompt falls back to new session when loadSession returns internal session
     });
 
     const prompt = await runCli(
-      ["--cwd", cwd, "--ttl", "0.01", "codex", "prompt", "echo hello"],
+      ["--cwd", cwd, "--ttl", "1", "codex", "prompt", "echo hello"],
       homeDir,
     );
     assert.equal(prompt.code, 0, prompt.stderr);
@@ -489,7 +489,7 @@ test("prompt prefers agentSessionId when reconnecting loadSession", async () => 
     });
 
     const prompt = await runCli(
-      ["--cwd", cwd, "--ttl", "0.01", "codex", "prompt", "echo hello"],
+      ["--cwd", cwd, "--ttl", "1", "codex", "prompt", "echo hello"],
       homeDir,
     );
     assert.equal(prompt.code, 0, prompt.stderr);
@@ -677,9 +677,7 @@ test("queued prompt failures emit exactly one JSON error event", async () => {
       if (blocker.exitCode === null) {
         blocker.kill("SIGKILL");
       }
-      await new Promise<void>((resolve) => {
-        blocker.once("close", () => resolve());
-      });
+      await waitForChildClose(blocker);
     }
   });
 });
@@ -750,9 +748,7 @@ test("queued prompt failures remain visible in quiet mode", async () => {
       if (blocker.exitCode === null) {
         blocker.kill("SIGKILL");
       }
-      await new Promise<void>((resolve) => {
-        blocker.once("close", () => resolve());
-      });
+      await waitForChildClose(blocker);
     }
   });
 });
@@ -1331,9 +1327,7 @@ async function runCli(
   homeDir: string,
   options: CliRunOptions = {},
 ): Promise<CliRunResult> {
-  const normalizedArgs = shouldInjectPromptTtl(args)
-    ? ["--ttl", "0.01", ...args]
-    : args;
+  const normalizedArgs = shouldInjectPromptTtl(args) ? ["--ttl", "1", ...args] : args;
   return await new Promise<CliRunResult>((resolve) => {
     const child = spawn(process.execPath, [CLI_PATH, ...normalizedArgs], {
       env: {
@@ -1399,6 +1393,15 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
     });
   }
   return false;
+}
+
+async function waitForChildClose(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+  });
 }
 
 async function writeSessionRecord(
