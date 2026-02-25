@@ -75,7 +75,7 @@ test("listSessions preserves stored turn history and lifecycle metadata", async 
   });
 });
 
-test("listSessions preserves optional runtimeSessionId", async () => {
+test("listSessions preserves optional agentSessionId", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();
     const cwd = path.join(homeDir, "workspace");
@@ -85,7 +85,7 @@ test("listSessions preserves optional runtimeSessionId", async () => {
       makeSessionRecord({
         id: "runtime-meta",
         sessionId: "runtime-meta",
-        runtimeSessionId: "provider-runtime-123",
+        agentSessionId: "provider-runtime-123",
         agentCommand: "agent-a",
         cwd,
       }),
@@ -94,11 +94,11 @@ test("listSessions preserves optional runtimeSessionId", async () => {
     const sessions = await session.listSessions();
     const record = sessions.find((entry) => entry.id === "runtime-meta");
     assert.ok(record);
-    assert.equal(record.runtimeSessionId, "provider-runtime-123");
+    assert.equal(record.agentSessionId, "provider-runtime-123");
   });
 });
 
-test("listSessions ignores invalid optional runtimeSessionId values", async () => {
+test("listSessions ignores invalid optional agentSessionId values", async () => {
   await withTempHome(async (homeDir) => {
     const session = await loadSessionModule();
     const cwd = path.join(homeDir, "workspace");
@@ -114,14 +114,14 @@ test("listSessions ignores invalid optional runtimeSessionId values", async () =
         agentCommand: "agent-a",
         cwd,
       }),
-      runtimeSessionId: 123,
+      agentSessionId: 123,
     };
     await fs.writeFile(filePath, `${JSON.stringify(invalidRecord, null, 2)}\n`, "utf8");
 
     const sessions = await session.listSessions();
     const record = sessions.find((entry) => entry.id === id);
     assert.ok(record);
-    assert.equal(record.runtimeSessionId, undefined);
+    assert.equal(record.agentSessionId, undefined);
   });
 });
 
@@ -505,7 +505,7 @@ function makeSessionRecord(overrides: Partial<SessionRecord>): SessionRecord {
   return {
     id: overrides.id ?? "session-id",
     sessionId: overrides.sessionId ?? overrides.id ?? "session-id",
-    runtimeSessionId: overrides.runtimeSessionId,
+    agentSessionId: overrides.agentSessionId,
     agentCommand: overrides.agentCommand ?? "agent-command",
     cwd: path.resolve(overrides.cwd ?? "/tmp/acpx"),
     name: overrides.name,

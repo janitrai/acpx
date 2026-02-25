@@ -41,7 +41,7 @@ import {
   setSessionMode,
   sendSession,
 } from "./session.js";
-import { normalizeRuntimeSessionId } from "./runtime-session-id.js";
+import { normalizeAgentSessionId } from "./agent-session-id.js";
 import {
   AUTH_POLICIES,
   EXIT_CODES,
@@ -438,7 +438,21 @@ function resolveAgentInvocation(
 
 function printSessionsByFormat(sessions: SessionRecord[], format: OutputFormat): void {
   if (format === "json") {
-    process.stdout.write(`${JSON.stringify(sessions)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(
+        sessions.map((session) => {
+          const { id, sessionId, agentSessionId, ...rest } = session;
+          return {
+            ...rest,
+            ...canonicalSessionIdentity({
+              id,
+              sessionId,
+              agentSessionId,
+            }),
+          };
+        }),
+      )}\n`,
+    );
     return;
   }
 
@@ -468,8 +482,7 @@ function printClosedSessionByFormat(record: SessionRecord, format: OutputFormat)
     process.stdout.write(
       `${JSON.stringify({
         type: "session_closed",
-        id: record.id,
-        sessionId: record.sessionId,
+        ...canonicalSessionIdentity(record),
         name: record.name,
       })}\n`,
     );
@@ -483,15 +496,21 @@ function printClosedSessionByFormat(record: SessionRecord, format: OutputFormat)
   process.stdout.write(`${record.id}\n`);
 }
 
-function runtimeSessionIdPayload(runtimeSessionId: string | undefined): {
-  runtimeSessionId?: string;
+function canonicalSessionIdentity(record: {
+  id: string;
+  sessionId: string;
+  agentSessionId?: string;
+}): {
+  acpxRecordId: string;
+  acpxSessionId: string;
+  agentSessionId?: string;
 } {
-  const normalized = normalizeRuntimeSessionId(runtimeSessionId);
-  if (!normalized) {
-    return {};
-  }
-
-  return { runtimeSessionId: normalized };
+  const normalizedAgentSessionId = normalizeAgentSessionId(record.agentSessionId);
+  return {
+    acpxRecordId: record.id,
+    acpxSessionId: record.sessionId,
+    ...(normalizedAgentSessionId ? { agentSessionId: normalizedAgentSessionId } : {}),
+  };
 }
 
 function printNewSessionByFormat(
@@ -503,11 +522,9 @@ function printNewSessionByFormat(
     process.stdout.write(
       `${JSON.stringify({
         type: "session_created",
-        id: record.id,
-        sessionId: record.sessionId,
+        ...canonicalSessionIdentity(record),
         name: record.name,
-        replacedSessionId: replaced?.id,
-        ...runtimeSessionIdPayload(record.runtimeSessionId),
+        ...(replaced ? { replacedAcpxRecordId: replaced.id } : {}),
       })}\n`,
     );
     return;
@@ -535,11 +552,9 @@ function printEnsuredSessionByFormat(
     process.stdout.write(
       `${JSON.stringify({
         type: "session_ensured",
-        id: record.id,
-        sessionId: record.sessionId,
+        ...canonicalSessionIdentity(record),
         name: record.name,
         created,
-        ...runtimeSessionIdPayload(record.runtimeSessionId),
       })}\n`,
     );
     return;
@@ -565,7 +580,7 @@ function printQueuedPromptByFormat(
     process.stdout.write(
       `${JSON.stringify({
         type: "queued",
-        sessionId: result.sessionId,
+        acpxRecordId: result.sessionId,
         requestId: result.requestId,
       })}\n`,
     );
@@ -779,7 +794,12 @@ function printCancelResultByFormat(
   format: OutputFormat,
 ): void {
   if (format === "json") {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({
+        acpxRecordId: result.sessionId || null,
+        cancelled: result.cancelled,
+      })}\n`,
+    );
     return;
   }
 
@@ -799,7 +819,7 @@ function printSetModeResultByFormat(
   if (format === "json") {
     process.stdout.write(
       `${JSON.stringify({
-        sessionId: result.record.id,
+        ...canonicalSessionIdentity(result.record),
         modeId,
         resumed: result.resumed,
       })}\n`,
@@ -828,7 +848,7 @@ function printSetConfigOptionResultByFormat(
   if (format === "json") {
     process.stdout.write(
       `${JSON.stringify({
-        sessionId: result.record.id,
+        ...canonicalSessionIdentity(result.record),
         configId,
         value,
         resumed: result.resumed,
@@ -1081,7 +1101,17 @@ function printSessionDetailsByFormat(
   format: OutputFormat,
 ): void {
   if (format === "json") {
-    process.stdout.write(`${JSON.stringify(record)}\n`);
+    const { id, sessionId, agentSessionId, ...rest } = record;
+    process.stdout.write(
+      `${JSON.stringify({
+        ...rest,
+        ...canonicalSessionIdentity({
+          id,
+          sessionId,
+          agentSessionId,
+        }),
+      })}\n`,
+    );
     return;
   }
 
@@ -1090,9 +1120,9 @@ function printSessionDetailsByFormat(
     return;
   }
 
-  process.stdout.write(`id: ${record.id}\n`);
-  process.stdout.write(`sessionId: ${record.sessionId}\n`);
-  process.stdout.write(`runtimeSessionId: ${record.runtimeSessionId ?? "-"}\n`);
+  process.stdout.write(`acpxRecordId: ${record.id}\n`);
+  process.stdout.write(`acpxSessionId: ${record.sessionId}\n`);
+  process.stdout.write(`agentSessionId: ${record.agentSessionId ?? "-"}\n`);
   process.stdout.write(`agent: ${record.agentCommand}\n`);
   process.stdout.write(`cwd: ${record.cwd}\n`);
   process.stdout.write(`name: ${record.name ?? "-"}\n`);
@@ -1123,8 +1153,7 @@ function printSessionHistoryByFormat(
   if (format === "json") {
     process.stdout.write(
       `${JSON.stringify({
-        id: record.id,
-        sessionId: record.sessionId,
+        ...canonicalSessionIdentity(record),
         limit,
         count: visible.length,
         entries: visible,
@@ -1242,7 +1271,9 @@ async function handleStatus(
 
   if (!record) {
     const payload = {
-      sessionId: null,
+      acpxRecordId: null,
+      acpxSessionId: null,
+      agentSessionId: null,
       agentCommand: agent.agentCommand,
       pid: null,
       status: "no-session",
@@ -1272,7 +1303,7 @@ async function handleStatus(
 
   const running = isProcessAlive(record.pid);
   const payload = {
-    sessionId: record.id,
+    ...canonicalSessionIdentity(record),
     agentCommand: record.agentCommand,
     pid: record.pid ?? null,
     status: running ? "running" : "dead",
@@ -1280,7 +1311,6 @@ async function handleStatus(
     lastPromptTime: record.lastPromptAt ?? null,
     exitCode: running ? null : (record.lastAgentExitCode ?? null),
     signal: running ? null : (record.lastAgentExitSignal ?? null),
-    ...runtimeSessionIdPayload(record.runtimeSessionId),
   };
 
   if (globalFlags.format === "json") {
@@ -1293,10 +1323,9 @@ async function handleStatus(
     return;
   }
 
-  process.stdout.write(`session: ${payload.sessionId}\n`);
-  if ("runtimeSessionId" in payload) {
-    process.stdout.write(`runtimeSessionId: ${payload.runtimeSessionId}\n`);
-  }
+  process.stdout.write(`acpxRecordId: ${payload.acpxRecordId}\n`);
+  process.stdout.write(`acpxSessionId: ${payload.acpxSessionId}\n`);
+  process.stdout.write(`agentSessionId: ${payload.agentSessionId ?? "-"}\n`);
   process.stdout.write(`agent: ${payload.agentCommand}\n`);
   process.stdout.write(`pid: ${payload.pid ?? "-"}\n`);
   process.stdout.write(`status: ${payload.status}\n`);

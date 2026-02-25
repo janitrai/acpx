@@ -35,7 +35,7 @@ import {
 } from "./errors.js";
 import { FileSystemHandlers } from "./filesystem.js";
 import { classifyPermissionDecision, resolvePermissionRequest } from "./permissions.js";
-import { extractRuntimeSessionId } from "./runtime-session-id.js";
+import { extractAgentSessionId } from "./agent-session-id.js";
 import { TerminalManager } from "./terminal.js";
 import type { AcpClientOptions, PermissionStats } from "./types.js";
 
@@ -56,11 +56,11 @@ type LoadSessionOptions = {
 
 export type SessionCreateResult = {
   sessionId: string;
-  runtimeSessionId?: string;
+  agentSessionId?: string;
 };
 
 export type SessionLoadResult = {
-  runtimeSessionId?: string;
+  agentSessionId?: string;
 };
 
 type AgentDisconnectReason =
@@ -491,7 +491,7 @@ export class AcpClient {
     });
     return {
       sessionId: result.sessionId,
-      runtimeSessionId: extractRuntimeSessionId(result._meta),
+      agentSessionId: extractAgentSessionId(result._meta),
     };
   }
 
@@ -531,7 +531,7 @@ export class AcpClient {
     }
 
     return {
-      runtimeSessionId: extractRuntimeSessionId(response?._meta),
+      agentSessionId: extractAgentSessionId(response?._meta),
     };
   }
 

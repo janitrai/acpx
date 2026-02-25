@@ -31,7 +31,7 @@ import {
   trySubmitToRunningOwner,
   waitMs,
 } from "./queue-ipc.js";
-import { normalizeRuntimeSessionId } from "./runtime-session-id.js";
+import { normalizeAgentSessionId } from "./agent-session-id.js";
 import {
   DEFAULT_HISTORY_LIMIT,
   absolutePath,
@@ -453,16 +453,16 @@ function applyLifecycleSnapshotToRecord(
   record.lastAgentDisconnectReason = undefined;
 }
 
-function reconcileRuntimeSessionId(
+function reconcileAgentSessionId(
   record: SessionRecord,
-  runtimeSessionId: string | undefined,
+  agentSessionId: string | undefined,
 ): void {
-  const normalized = normalizeRuntimeSessionId(runtimeSessionId);
+  const normalized = normalizeAgentSessionId(agentSessionId);
   if (!normalized) {
     return;
   }
 
-  record.runtimeSessionId = normalized;
+  record.agentSessionId = normalized;
 }
 
 function shouldFallbackToNewSession(error: unknown): boolean {
@@ -485,7 +485,7 @@ type ConnectAndLoadSessionOptions = {
 
 type ConnectAndLoadSessionResult = {
   sessionId: string;
-  runtimeSessionId?: string;
+  agentSessionId?: string;
   resumed: boolean;
   loadError?: string;
 };
@@ -530,7 +530,7 @@ async function connectAndLoadSession(
         }),
         options.timeoutMs,
       );
-      reconcileRuntimeSessionId(record, loadResult.runtimeSessionId);
+      reconcileAgentSessionId(record, loadResult.agentSessionId);
       resumed = true;
     } catch (error) {
       loadError = formatErrorMessage(error);
@@ -543,7 +543,7 @@ async function connectAndLoadSession(
       );
       sessionId = createdSession.sessionId;
       record.sessionId = sessionId;
-      reconcileRuntimeSessionId(record, createdSession.runtimeSessionId);
+      reconcileAgentSessionId(record, createdSession.agentSessionId);
     }
   } else {
     const createdSession = await withTimeout(
@@ -552,14 +552,14 @@ async function connectAndLoadSession(
     );
     sessionId = createdSession.sessionId;
     record.sessionId = sessionId;
-    reconcileRuntimeSessionId(record, createdSession.runtimeSessionId);
+    reconcileAgentSessionId(record, createdSession.agentSessionId);
   }
 
   options.onSessionIdResolved?.(sessionId);
 
   return {
     sessionId,
-    runtimeSessionId: record.runtimeSessionId,
+    agentSessionId: record.agentSessionId,
     resumed,
     loadError,
   };
@@ -1063,7 +1063,7 @@ export async function createSession(
         const record: SessionRecord = {
           id: sessionId,
           sessionId,
-          runtimeSessionId: createdSession.runtimeSessionId,
+          agentSessionId: createdSession.agentSessionId,
           agentCommand: options.agentCommand,
           cwd: absolutePath(options.cwd),
           name: normalizeName(options.name),

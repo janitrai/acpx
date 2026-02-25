@@ -1,6 +1,6 @@
-const RUNTIME_SESSION_ID_META_KEYS = ["agentSessionId"] as const;
+const AGENT_SESSION_ID_META_KEYS = ["agentSessionId"] as const;
 
-export function normalizeRuntimeSessionId(value: unknown): string | undefined {
+export function normalizeAgentSessionId(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
@@ -16,14 +16,14 @@ function asMetaRecord(meta: unknown): Record<string, unknown> | undefined {
   return meta as Record<string, unknown>;
 }
 
-export function extractRuntimeSessionId(meta: unknown): string | undefined {
+export function extractAgentSessionId(meta: unknown): string | undefined {
   const record = asMetaRecord(meta);
   if (!record) {
     return undefined;
   }
 
-  for (const key of RUNTIME_SESSION_ID_META_KEYS) {
-    const normalized = normalizeRuntimeSessionId(record[key]);
+  for (const key of AGENT_SESSION_ID_META_KEYS) {
+    const normalized = normalizeAgentSessionId(record[key]);
     if (normalized) {
       return normalized;
     }
@@ -32,4 +32,4 @@ export function extractRuntimeSessionId(meta: unknown): string | undefined {
   return undefined;
 }
 
-export { RUNTIME_SESSION_ID_META_KEYS };
+export { AGENT_SESSION_ID_META_KEYS };

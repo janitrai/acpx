@@ -12,9 +12,9 @@ import type { SessionRecord } from "../src/types.js";
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 const MOCK_AGENT_COMMAND = `node ${JSON.stringify(MOCK_AGENT_PATH)}`;
-const MOCK_CODEX_AGENT_WITH_RUNTIME_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id codex-runtime-session`;
-const MOCK_CLAUDE_AGENT_WITH_RUNTIME_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id claude-runtime-session`;
-const MOCK_AGENT_WITH_LOAD_RUNTIME_SESSION_ID = `${MOCK_AGENT_COMMAND} --supports-load-session --load-agent-session-id loaded-runtime-session`;
+const MOCK_CODEX_AGENT_WITH_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id codex-runtime-session`;
+const MOCK_CLAUDE_AGENT_WITH_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id claude-runtime-session`;
+const MOCK_AGENT_WITH_LOAD_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --supports-load-session --load-agent-session-id loaded-runtime-session`;
 
 type CliRunResult = {
   code: number | null;
@@ -145,7 +145,8 @@ test("sessions ensure creates when missing and returns existing on subsequent ca
     assert.equal(first.code, 0, first.stderr);
     const firstPayload = JSON.parse(first.stdout.trim()) as {
       type: string;
-      id: string;
+      acpxRecordId: string;
+      acpxSessionId: string;
       created: boolean;
     };
     assert.equal(firstPayload.type, "session_ensured");
@@ -158,12 +159,14 @@ test("sessions ensure creates when missing and returns existing on subsequent ca
     assert.equal(second.code, 0, second.stderr);
     const secondPayload = JSON.parse(second.stdout.trim()) as {
       type: string;
-      id: string;
+      acpxRecordId: string;
+      acpxSessionId: string;
       created: boolean;
     };
     assert.equal(secondPayload.type, "session_ensured");
     assert.equal(secondPayload.created, false);
-    assert.equal(secondPayload.id, firstPayload.id);
+    assert.equal(secondPayload.acpxRecordId, firstPayload.acpxRecordId);
+    assert.equal(secondPayload.acpxSessionId, firstPayload.acpxSessionId);
   });
 });
 
@@ -190,15 +193,17 @@ test("sessions ensure resolves existing session by directory walk", async () => 
     );
     assert.equal(result.code, 0, result.stderr);
     const payload = JSON.parse(result.stdout.trim()) as {
-      id: string;
+      acpxRecordId: string;
+      acpxSessionId: string;
       created: boolean;
     };
-    assert.equal(payload.id, "parent-session");
+    assert.equal(payload.acpxRecordId, "parent-session");
+    assert.equal(payload.acpxSessionId, "parent-session");
     assert.equal(payload.created, false);
   });
 });
 
-test("sessions and status surface runtimeSessionId for codex and claude in JSON mode", async () => {
+test("sessions and status surface agentSessionId for codex and claude in JSON mode", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
@@ -206,13 +211,13 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
     const runtimeScenarios = [
       {
         agentName: "codex",
-        command: MOCK_CODEX_AGENT_WITH_RUNTIME_SESSION_ID,
-        expectedRuntimeSessionId: "codex-runtime-session",
+        command: MOCK_CODEX_AGENT_WITH_AGENT_SESSION_ID,
+        expectedAgentSessionId: "codex-runtime-session",
       },
       {
         agentName: "claude",
-        command: MOCK_CLAUDE_AGENT_WITH_RUNTIME_SESSION_ID,
-        expectedRuntimeSessionId: "claude-runtime-session",
+        command: MOCK_CLAUDE_AGENT_WITH_AGENT_SESSION_ID,
+        expectedAgentSessionId: "claude-runtime-session",
       },
     ] as const;
 
@@ -244,10 +249,14 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
       assert.equal(created.code, 0, created.stderr);
       const createdPayload = JSON.parse(created.stdout.trim()) as {
         type: string;
-        runtimeSessionId?: string;
+        acpxRecordId: string;
+        acpxSessionId: string;
+        agentSessionId?: string;
       };
       assert.equal(createdPayload.type, "session_created");
-      assert.equal(createdPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
+      assert.equal(createdPayload.acpxRecordId.length > 0, true);
+      assert.equal(createdPayload.acpxSessionId.length > 0, true);
+      assert.equal(createdPayload.agentSessionId, scenario.expectedAgentSessionId);
 
       const ensured = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "sessions", "ensure"],
@@ -257,11 +266,15 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
       const ensuredPayload = JSON.parse(ensured.stdout.trim()) as {
         type: string;
         created: boolean;
-        runtimeSessionId?: string;
+        acpxRecordId: string;
+        acpxSessionId: string;
+        agentSessionId?: string;
       };
       assert.equal(ensuredPayload.type, "session_ensured");
       assert.equal(ensuredPayload.created, false);
-      assert.equal(ensuredPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
+      assert.equal(ensuredPayload.acpxRecordId.length > 0, true);
+      assert.equal(ensuredPayload.acpxSessionId.length > 0, true);
+      assert.equal(ensuredPayload.agentSessionId, scenario.expectedAgentSessionId);
 
       const status = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "status"],
@@ -269,14 +282,18 @@ test("sessions and status surface runtimeSessionId for codex and claude in JSON 
       );
       assert.equal(status.code, 0, status.stderr);
       const statusPayload = JSON.parse(status.stdout.trim()) as {
-        runtimeSessionId?: string;
+        acpxRecordId: string;
+        acpxSessionId: string;
+        agentSessionId?: string;
       };
-      assert.equal(statusPayload.runtimeSessionId, scenario.expectedRuntimeSessionId);
+      assert.equal(statusPayload.acpxRecordId.length > 0, true);
+      assert.equal(statusPayload.acpxSessionId.length > 0, true);
+      assert.equal(statusPayload.agentSessionId, scenario.expectedAgentSessionId);
     }
   });
 });
 
-test("prompt reconciles runtimeSessionId from loadSession metadata", async () => {
+test("prompt reconciles agentSessionId from loadSession metadata", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
@@ -287,7 +304,7 @@ test("prompt reconciles runtimeSessionId from loadSession metadata", async () =>
         {
           agents: {
             codex: {
-              command: MOCK_AGENT_WITH_LOAD_RUNTIME_SESSION_ID,
+              command: MOCK_AGENT_WITH_LOAD_AGENT_SESSION_ID,
             },
           },
         },
@@ -301,7 +318,7 @@ test("prompt reconciles runtimeSessionId from loadSession metadata", async () =>
     await writeSessionRecord(homeDir, {
       id: sessionId,
       sessionId,
-      agentCommand: MOCK_AGENT_WITH_LOAD_RUNTIME_SESSION_ID,
+      agentCommand: MOCK_AGENT_WITH_LOAD_AGENT_SESSION_ID,
       cwd,
       createdAt: "2026-01-01T00:00:00.000Z",
       lastUsedAt: "2026-01-01T00:00:00.000Z",
@@ -323,7 +340,7 @@ test("prompt reconciles runtimeSessionId from loadSession metadata", async () =>
     const storedRecord = JSON.parse(
       await fs.readFile(storedRecordPath, "utf8"),
     ) as SessionRecord;
-    assert.equal(storedRecord.runtimeSessionId, "loaded-runtime-session");
+    assert.equal(storedRecord.agentSessionId, "loaded-runtime-session");
   });
 });
 
@@ -604,10 +621,12 @@ test("--json-strict suppresses session banners on stderr", async () => {
     assert.equal(result.stderr.trim(), "");
     const payload = JSON.parse(result.stdout.trim()) as {
       type: string;
-      id: string;
+      acpxRecordId: string;
+      acpxSessionId: string;
     };
     assert.equal(payload.type, "session_created");
-    assert.equal(typeof payload.id, "string");
+    assert.equal(typeof payload.acpxRecordId, "string");
+    assert.equal(typeof payload.acpxSessionId, "string");
   });
 });
 
@@ -714,10 +733,10 @@ test("cancel resolves named session when -s is before subcommand", async () => {
 
     assert.equal(result.code, 0, result.stderr);
     const payload = JSON.parse(result.stdout.trim()) as {
-      sessionId: string;
+      acpxRecordId: string | null;
       cancelled: boolean;
     };
-    assert.equal(payload.sessionId, "named-cancel-session");
+    assert.equal(payload.acpxRecordId, "named-cancel-session");
     assert.equal(payload.cancelled, false);
   });
 });
@@ -745,14 +764,16 @@ test("status resolves named session when -s is before subcommand", async () => {
 
     assert.equal(result.code, 0, result.stderr);
     const payload = JSON.parse(result.stdout.trim()) as {
-      sessionId: string | null;
+      acpxRecordId: string | null;
+      acpxSessionId: string | null;
       status: string;
-      runtimeSessionId?: string | null;
+      agentSessionId?: string | null;
     };
-    assert.equal(payload.sessionId, "named-status-session");
+    assert.equal(payload.acpxRecordId, "named-status-session");
+    assert.equal(payload.acpxSessionId, "named-status-session");
     assert.equal(payload.status, "dead");
     assert.notEqual(payload.status, "no-session");
-    assert.equal("runtimeSessionId" in payload, false);
+    assert.equal("agentSessionId" in payload, false);
   });
 });
 
