@@ -12,6 +12,7 @@ import type { SessionRecord } from "../src/types.js";
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 const MOCK_AGENT_COMMAND = `node ${JSON.stringify(MOCK_AGENT_PATH)}`;
+const MOCK_AGENT_IGNORING_SIGTERM = `${MOCK_AGENT_COMMAND} --ignore-sigterm`;
 const MOCK_CODEX_AGENT_WITH_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id codex-runtime-session`;
 const MOCK_CLAUDE_AGENT_WITH_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --agent-session-id claude-runtime-session`;
 const MOCK_AGENT_WITH_LOAD_AGENT_SESSION_ID = `${MOCK_AGENT_COMMAND} --supports-load-session --load-agent-session-id loaded-runtime-session`;
@@ -169,6 +170,61 @@ test("sessions ensure creates when missing and returns existing on subsequent ca
     assert.equal(secondPayload.created, false);
     assert.equal(secondPayload.acpxRecordId, firstPayload.acpxRecordId);
     assert.equal(secondPayload.acpxSessionId, firstPayload.acpxSessionId);
+  });
+});
+
+test("sessions ensure exits even when agent ignores SIGTERM", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: {
+              command: MOCK_AGENT_IGNORING_SIGTERM,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const result = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
+      homeDir,
+      { timeoutMs: 8_000 },
+    );
+    assert.equal(result.code, 0, result.stderr);
+
+    const payload = JSON.parse(result.stdout.trim()) as {
+      type: string;
+      created: boolean;
+      acpxRecordId: string;
+    };
+    assert.equal(payload.type, "session_ensured");
+    assert.equal(payload.created, true);
+
+    const storedRecord = JSON.parse(
+      await fs.readFile(
+        path.join(
+          homeDir,
+          ".acpx",
+          "sessions",
+          `${encodeURIComponent(payload.acpxRecordId)}.json`,
+        ),
+        "utf8",
+      ),
+    ) as SessionRecord;
+
+    if (storedRecord.pid != null) {
+      const exited = await waitForPidExit(storedRecord.pid, 2_000);
+      assert.equal(exited, true);
+    }
   });
 });
 
@@ -1190,6 +1246,7 @@ async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<vo
 type CliRunOptions = {
   stdin?: string;
   cwd?: string;
+  timeoutMs?: number;
 };
 
 const LONG_OPTIONS_WITH_VALUE = new Set([
@@ -1306,10 +1363,42 @@ async function runCli(
       child.stdin.end();
     }
 
+    let timedOut = false;
+    let timeout: NodeJS.Timeout | undefined;
+    if (options.timeoutMs != null && options.timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        if (child.exitCode == null && child.signalCode == null) {
+          child.kill("SIGKILL");
+        }
+      }, options.timeoutMs);
+    }
+
     child.once("close", (code) => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (timedOut) {
+        stderr += `[test] timed out after ${options.timeoutMs}ms\n`;
+      }
       resolve({ code, stdout, stderr });
     });
   });
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50);
+    });
+  }
+  return false;
 }
 
 async function writeSessionRecord(

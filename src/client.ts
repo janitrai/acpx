@@ -47,6 +47,9 @@ type CommandParts = {
 const REPLAY_IDLE_MS = 80;
 const REPLAY_DRAIN_TIMEOUT_MS = 5_000;
 const DRAIN_POLL_INTERVAL_MS = 20;
+const AGENT_CLOSE_AFTER_STDIN_END_MS = 100;
+const AGENT_CLOSE_TERM_GRACE_MS = 1_500;
+const AGENT_CLOSE_KILL_GRACE_MS = 1_000;
 
 type LoadSessionOptions = {
   suppressReplayUpdates?: boolean;
@@ -129,6 +132,47 @@ function waitForSpawn(child: ChildProcess): Promise<void> {
 
     child.once("spawn", onSpawn);
     child.once("error", onError);
+  });
+}
+
+function isChildProcessRunning(child: ChildProcess): boolean {
+  return child.exitCode == null && child.signalCode == null;
+}
+
+function waitForChildExit(
+  child: ChildProcessByStdio<Writable, Readable, Readable>,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!isChildProcessRunning(child)) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(
+      () => {
+        finish(false);
+      },
+      Math.max(0, timeoutMs),
+    );
+
+    const finish = (value: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.off("close", onExitLike);
+      child.off("exit", onExitLike);
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    const onExitLike = () => {
+      finish(true);
+    };
+
+    child.once("close", onExitLike);
+    child.once("exit", onExitLike);
   });
 }
 
@@ -665,8 +709,8 @@ export class AcpClient {
 
     await this.terminalManager.shutdown();
 
-    if (this.agent && !this.agent.killed) {
-      this.agent.kill();
+    if (this.agent) {
+      await this.terminateAgentProcess(this.agent);
     }
 
     this.sessionUpdateChain = Promise.resolve();
@@ -678,6 +722,56 @@ export class AcpClient {
     this.promptPermissionFailures.clear();
     this.connection = undefined;
     this.agent = undefined;
+  }
+
+  private async terminateAgentProcess(
+    child: ChildProcessByStdio<Writable, Readable, Readable>,
+  ): Promise<void> {
+    // Closing stdin is the most graceful shutdown signal for stdio-based ACP agents.
+    if (!child.stdin.destroyed) {
+      try {
+        child.stdin.end();
+      } catch {
+        // best effort
+      }
+    }
+
+    let exited = await waitForChildExit(child, AGENT_CLOSE_AFTER_STDIN_END_MS);
+    if (!exited && isChildProcessRunning(child)) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best effort
+      }
+      exited = await waitForChildExit(child, AGENT_CLOSE_TERM_GRACE_MS);
+    }
+
+    if (!exited && isChildProcessRunning(child)) {
+      this.log(
+        `agent did not exit after ${AGENT_CLOSE_TERM_GRACE_MS}ms; forcing SIGKILL`,
+      );
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // best effort
+      }
+      exited = await waitForChildExit(child, AGENT_CLOSE_KILL_GRACE_MS);
+    }
+
+    // Ensure stdio handles don't keep this process alive after close() returns.
+    if (!child.stdin.destroyed) {
+      child.stdin.destroy();
+    }
+    if (!child.stdout.destroyed) {
+      child.stdout.destroy();
+    }
+    if (!child.stderr.destroyed) {
+      child.stderr.destroy();
+    }
+
+    if (!exited) {
+      child.unref();
+    }
   }
 
   private getConnection(): ClientSideConnection {
