@@ -1,37 +1,31 @@
-import type {
-  SessionNotification,
-  SetSessionConfigOptionResponse,
-  StopReason,
-} from "@agentclientprotocol/sdk";
-import { spawn } from "node:child_process";
+import type { SessionNotification, StopReason } from "@agentclientprotocol/sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { AcpClient } from "./client.js";
-import { QueueConnectionError } from "./errors.js";
 import { formatErrorMessage, normalizeOutputError } from "./error-normalization.js";
 import { isAcpResourceNotFoundError } from "./acp-error-shapes.js";
-import {
-  QueueOwnerTurnController,
-  type QueueOwnerActiveSessionController,
-} from "./queue-owner-turn-controller.js";
+import type { QueueOwnerActiveSessionController } from "./queue-owner-turn-controller.js";
 import {
   type QueueOwnerMessage,
   type QueueTask,
-  QUEUE_CONNECT_RETRY_MS,
-  SessionQueueOwner,
   isProcessAlive,
   readQueueOwnerStatus,
-  refreshQueueOwnerLease,
-  releaseQueueOwnerLease,
   terminateProcess,
   terminateQueueOwnerForSession,
-  tryAcquireQueueOwnerLease,
   tryCancelOnRunningOwner,
   trySetConfigOptionOnRunningOwner,
   trySetModeOnRunningOwner,
-  trySubmitToRunningOwner,
-  waitMs,
 } from "./queue-ipc.js";
+import {
+  runQueueOwnerProcess as runQueueOwnerProcessInternal,
+  normalizeQueueOwnerTtlMs,
+  DEFAULT_QUEUE_OWNER_TTL_MS,
+  type QueueOwnerRunOptions,
+} from "./session-owner-runtime.js";
+import {
+  sendViaDetachedQueueOwner,
+  type QueueOwnerSpawnConfig,
+} from "./session-owner-spawn.js";
 import {
   DEFAULT_HISTORY_LIMIT,
   absolutePath,
@@ -72,11 +66,7 @@ import type {
   SessionSendResult,
 } from "./types.js";
 
-export const DEFAULT_QUEUE_OWNER_TTL_MS = 300_000;
 const INTERRUPT_CANCEL_WAIT_MS = 2_500;
-const QUEUE_OWNER_HEARTBEAT_INTERVAL_MS = 2_000;
-const QUEUE_OWNER_STARTUP_TIMEOUT_MS = 10_000;
-const QUEUE_OWNER_RESPAWN_BACKOFF_MS = 250;
 
 export class TimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -120,13 +110,6 @@ export type SessionCreateOptions = {
   verbose?: boolean;
 } & TimedRunOptions;
 
-export type QueueOwnerSpawnConfig = {
-  command: string;
-  args: string[];
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-};
-
 export type SessionSendOptions = {
   sessionId: string;
   message: string;
@@ -142,18 +125,6 @@ export type SessionSendOptions = {
   ttlMs?: number;
   queueOwnerSpawn?: QueueOwnerSpawnConfig;
 } & TimedRunOptions;
-
-export type QueueOwnerRunOptions = {
-  sessionId: string;
-  ttlMs?: number;
-  permissionMode: PermissionMode;
-  nonInteractivePermissions?: NonInteractivePermissionPolicy;
-  authCredentials?: Record<string, string>;
-  authPolicy?: AuthPolicy;
-  timeoutMs?: number;
-  suppressSdkConsoleErrors?: boolean;
-  verbose?: boolean;
-};
 
 export type SessionEnsureOptions = {
   agentCommand: string;
@@ -369,18 +340,6 @@ const DISCARD_OUTPUT_FORMATTER: OutputFormatter = {
     // no-op
   },
 };
-export function normalizeQueueOwnerTtlMs(ttlMs: number | undefined): number {
-  if (ttlMs == null) {
-    return DEFAULT_QUEUE_OWNER_TTL_MS;
-  }
-
-  if (!Number.isFinite(ttlMs) || ttlMs < 0) {
-    return DEFAULT_QUEUE_OWNER_TTL_MS;
-  }
-
-  // 0 means keep alive forever (no TTL)
-  return Math.round(ttlMs);
-}
 
 function shouldFallbackToNewSession(error: unknown): boolean {
   if (error instanceof TimeoutError || error instanceof InterruptedError) {
@@ -955,27 +914,15 @@ export async function ensureSession(
   };
 }
 
-type QueueOwnerTurnRuntime = {
-  beginClosing: () => void;
-  onClientAvailable: (controller: ActiveSessionController) => void;
-  onClientClosed: () => void;
-  onPromptActive: () => Promise<void>;
-  runPromptTurn: <T>(run: () => Promise<T>) => Promise<T>;
-  controlHandlers: {
-    cancelPrompt: () => Promise<boolean>;
-    setSessionMode: (modeId: string, timeoutMs?: number) => Promise<void>;
-    setSessionConfigOption: (
-      configId: string,
-      value: string,
-      timeoutMs?: number,
-    ) => Promise<SetSessionConfigOptionResponse>;
-  };
-};
+export { DEFAULT_QUEUE_OWNER_TTL_MS, normalizeQueueOwnerTtlMs };
+export type { QueueOwnerRunOptions } from "./session-owner-runtime.js";
+export type { QueueOwnerSpawnConfig } from "./session-owner-spawn.js";
 
-function createQueueOwnerTurnRuntime(
+export async function runQueueOwnerProcess(
   options: QueueOwnerRunOptions,
-): QueueOwnerTurnRuntime {
-  const turnController = new QueueOwnerTurnController({
+): Promise<void> {
+  await runQueueOwnerProcessInternal(options, {
+    runQueuedTask,
     withTimeout: async (run, timeoutMs) => await withTimeout(run(), timeoutMs),
     setSessionModeFallback: async (modeId: string, timeoutMs?: number) => {
       await runSessionSetModeDirect({
@@ -1006,281 +953,12 @@ function createQueueOwnerTurnRuntime(
       return result.response;
     },
   });
-
-  const applyPendingCancel = async (): Promise<boolean> => {
-    return await turnController.applyPendingCancel();
-  };
-
-  const scheduleApplyPendingCancel = (): void => {
-    void applyPendingCancel().catch((error) => {
-      if (options.verbose) {
-        process.stderr.write(
-          `[acpx] failed to apply deferred cancel: ${formatErrorMessage(error)}\n`,
-        );
-      }
-    });
-  };
-
-  return {
-    beginClosing: () => {
-      turnController.beginClosing();
-    },
-    onClientAvailable: (controller: ActiveSessionController) => {
-      turnController.setActiveController(controller);
-      scheduleApplyPendingCancel();
-    },
-    onClientClosed: () => {
-      turnController.clearActiveController();
-    },
-    onPromptActive: async () => {
-      turnController.markPromptActive();
-      await applyPendingCancel();
-    },
-    runPromptTurn: async <T>(run: () => Promise<T>): Promise<T> => {
-      turnController.beginTurn();
-      try {
-        return await run();
-      } finally {
-        turnController.endTurn();
-      }
-    },
-    controlHandlers: {
-      cancelPrompt: async () => {
-        const accepted = await turnController.requestCancel();
-        if (!accepted) {
-          return false;
-        }
-        await applyPendingCancel();
-        return true;
-      },
-      setSessionMode: async (modeId: string, timeoutMs?: number) => {
-        await turnController.setSessionMode(modeId, timeoutMs);
-      },
-      setSessionConfigOption: async (
-        configId: string,
-        value: string,
-        timeoutMs?: number,
-      ) => {
-        return await turnController.setSessionConfigOption(configId, value, timeoutMs);
-      },
-    },
-  };
-}
-
-export async function runQueueOwnerProcess(
-  options: QueueOwnerRunOptions,
-): Promise<void> {
-  const queueOwnerTtlMs = normalizeQueueOwnerTtlMs(options.ttlMs);
-  const lease = await tryAcquireQueueOwnerLease(options.sessionId);
-  if (!lease) {
-    if (options.verbose) {
-      process.stderr.write(
-        `[acpx] queue owner already active for session ${options.sessionId}; skipping spawn\n`,
-      );
-    }
-    return;
-  }
-
-  const runtime = createQueueOwnerTurnRuntime(options);
-  let owner: SessionQueueOwner | undefined;
-  let heartbeatTimer: NodeJS.Timeout | undefined;
-  const refreshHeartbeat = async () => {
-    if (!owner) {
-      return;
-    }
-    await refreshQueueOwnerLease(lease, {
-      queueDepth: owner.queueDepth(),
-    }).catch((error) => {
-      if (options.verbose) {
-        process.stderr.write(
-          `[acpx] queue owner heartbeat update failed: ${formatErrorMessage(error)}\n`,
-        );
-      }
-    });
-  };
-  try {
-    owner = await SessionQueueOwner.start(lease, runtime.controlHandlers);
-    await refreshHeartbeat();
-    heartbeatTimer = setInterval(() => {
-      void refreshHeartbeat();
-    }, QUEUE_OWNER_HEARTBEAT_INTERVAL_MS);
-    heartbeatTimer.unref();
-    const idleWaitMs = queueOwnerTtlMs === 0 ? undefined : Math.max(0, queueOwnerTtlMs);
-
-    while (true) {
-      const task = await owner.nextTask(idleWaitMs);
-      if (!task) {
-        if (queueOwnerTtlMs > 0 && options.verbose) {
-          process.stderr.write(
-            `[acpx] queue owner TTL expired after ${Math.round(queueOwnerTtlMs / 1_000)}s for session ${options.sessionId}; shutting down\n`,
-          );
-        }
-        break;
-      }
-
-      await runtime.runPromptTurn(async () => {
-        await runQueuedTask(options.sessionId, task, {
-          verbose: options.verbose,
-          nonInteractivePermissions: options.nonInteractivePermissions,
-          authCredentials: options.authCredentials,
-          authPolicy: options.authPolicy,
-          suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
-          onClientAvailable: runtime.onClientAvailable,
-          onClientClosed: runtime.onClientClosed,
-          onPromptActive: runtime.onPromptActive,
-        });
-      });
-      await refreshHeartbeat();
-    }
-  } finally {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-    }
-    runtime.beginClosing();
-    if (owner) {
-      await owner.close();
-    }
-    await releaseQueueOwnerLease(lease);
-  }
-}
-
-function isQueueNotAcceptingError(error: unknown): boolean {
-  return (
-    error instanceof QueueConnectionError &&
-    error.detailCode === "QUEUE_NOT_ACCEPTING_REQUESTS"
-  );
-}
-
-function spawnDetachedQueueOwner(ownerSpawn: QueueOwnerSpawnConfig): void {
-  const child = spawn(ownerSpawn.command, ownerSpawn.args, {
-    cwd: ownerSpawn.cwd,
-    env: ownerSpawn.env,
-    stdio: "ignore",
-    detached: true,
-  });
-  child.unref();
-}
-
-async function buildDefaultQueueOwnerSpawn(
-  options: SessionSendOptions,
-  queueOwnerTtlMs: number,
-): Promise<QueueOwnerSpawnConfig> {
-  const entrypoint = process.argv[1];
-  if (!entrypoint) {
-    throw new Error("Cannot spawn queue owner process: CLI entrypoint is missing");
-  }
-
-  const record = await resolveSessionRecord(options.sessionId);
-  const args = [
-    entrypoint,
-    "__queue-owner",
-    "--session-id",
-    options.sessionId,
-    "--ttl-ms",
-    String(queueOwnerTtlMs),
-    "--permission-mode",
-    options.permissionMode,
-  ];
-
-  if (options.nonInteractivePermissions) {
-    args.push("--non-interactive-permissions", options.nonInteractivePermissions);
-  }
-  if (options.authPolicy) {
-    args.push("--auth-policy", options.authPolicy);
-  }
-  if (
-    options.timeoutMs != null &&
-    Number.isFinite(options.timeoutMs) &&
-    options.timeoutMs > 0
-  ) {
-    args.push("--timeout-ms", String(Math.round(options.timeoutMs)));
-  }
-  if (options.verbose) {
-    args.push("--verbose");
-  }
-  if (options.suppressSdkConsoleErrors) {
-    args.push("--suppress-sdk-console-errors");
-  }
-
-  return {
-    command: process.execPath,
-    args,
-    cwd: absolutePath(record.cwd),
-  };
 }
 
 export async function sendSession(
   options: SessionSendOptions,
 ): Promise<SessionSendOutcome> {
-  const waitForCompletion = options.waitForCompletion !== false;
-  const queueOwnerTtlMs = normalizeQueueOwnerTtlMs(options.ttlMs);
-  const ownerSpawn =
-    options.queueOwnerSpawn ??
-    (await buildDefaultQueueOwnerSpawn(options, queueOwnerTtlMs));
-  const startupDeadline = Date.now() + QUEUE_OWNER_STARTUP_TIMEOUT_MS;
-  let lastSpawnAttemptAt = 0;
-
-  for (;;) {
-    try {
-      const queuedToOwner = await trySubmitToRunningOwner({
-        sessionId: options.sessionId,
-        message: options.message,
-        permissionMode: options.permissionMode,
-        nonInteractivePermissions: options.nonInteractivePermissions,
-        outputFormatter: options.outputFormatter,
-        errorEmissionPolicy: options.errorEmissionPolicy,
-        timeoutMs: options.timeoutMs,
-        suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
-        waitForCompletion,
-        verbose: options.verbose,
-      });
-      if (queuedToOwner) {
-        return queuedToOwner;
-      }
-    } catch (error) {
-      if (!isQueueNotAcceptingError(error)) {
-        throw error;
-      }
-
-      if (Date.now() >= startupDeadline) {
-        throw new QueueConnectionError(
-          "Timed out waiting for detached queue owner to accept prompt requests",
-          {
-            detailCode: "QUEUE_NOT_ACCEPTING_REQUESTS",
-            origin: "queue",
-            retryable: true,
-            cause: error instanceof Error ? error : undefined,
-          },
-        );
-      }
-      await waitMs(QUEUE_CONNECT_RETRY_MS);
-      continue;
-    }
-
-    const now = Date.now();
-    if (now >= startupDeadline) {
-      throw new QueueConnectionError(
-        "Timed out waiting for detached queue owner to start",
-        {
-          detailCode: "QUEUE_NOT_ACCEPTING_REQUESTS",
-          origin: "queue",
-          retryable: true,
-        },
-      );
-    }
-
-    if (now - lastSpawnAttemptAt >= QUEUE_OWNER_RESPAWN_BACKOFF_MS) {
-      spawnDetachedQueueOwner(ownerSpawn);
-      lastSpawnAttemptAt = now;
-      if (options.verbose) {
-        process.stderr.write(
-          `[acpx] starting detached queue owner for session ${options.sessionId}\n`,
-        );
-      }
-    }
-
-    await waitMs(QUEUE_CONNECT_RETRY_MS);
-  }
+  return await sendViaDetachedQueueOwner(options);
 }
 
 export async function readSessionQueueOwnerStatus(sessionId: string): Promise<
