@@ -29,6 +29,7 @@ type MockAgentOptions = {
   supportsLoadSession: boolean;
   loadSessionInternalNotFound?: boolean;
   requireLoadSessionId?: string;
+  ignoreSigterm?: boolean;
 };
 
 type SessionState = {
@@ -236,6 +237,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
   let supportsLoadSession = false;
   let loadSessionInternalNotFound = false;
   let requireLoadSessionId: string | undefined;
+  let ignoreSigterm = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -255,6 +257,11 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
       supportsLoadSession = true;
       requireLoadSessionId = parseOptionValue(argv, index + 1, token);
       index += 1;
+      continue;
+    }
+
+    if (token === "--ignore-sigterm") {
+      ignoreSigterm = true;
       continue;
     }
 
@@ -284,6 +291,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
     supportsLoadSession,
     loadSessionInternalNotFound,
     requireLoadSessionId,
+    ignoreSigterm,
   };
 }
 
@@ -562,6 +570,11 @@ const output = Writable.toWeb(process.stdout);
 const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 const stream = ndJsonStream(output, input);
 const mockAgentOptions = parseMockAgentOptions(process.argv.slice(2));
+if (mockAgentOptions.ignoreSigterm) {
+  process.on("SIGTERM", () => {
+    // Intentionally ignore SIGTERM for shutdown-path regression coverage.
+  });
+}
 new AgentSideConnection(
   (connection) => new MockAgent(connection, mockAgentOptions),
   stream,
