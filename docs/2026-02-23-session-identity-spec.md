@@ -1,4 +1,4 @@
-# 2026-02-23 Runtime Session ID Specification
+# 2026-02-23 Session Identity Specification
 
 Status: Draft
 Owner: acpx
