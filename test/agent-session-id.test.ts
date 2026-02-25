@@ -5,8 +5,8 @@ import {
   extractAgentSessionId,
 } from "../src/agent-session-id.js";
 
-test("runtime session id precedence is stable", () => {
-  assert.deepEqual(AGENT_SESSION_ID_META_KEYS, ["agentSessionId"]);
+test("agent session id precedence is stable", () => {
+  assert.deepEqual(AGENT_SESSION_ID_META_KEYS, ["agentSessionId", "sessionId"]);
 });
 
 test("extractAgentSessionId reads agentSessionId when present", () => {
@@ -15,6 +15,25 @@ test("extractAgentSessionId reads agentSessionId when present", () => {
   };
 
   assert.equal(extractAgentSessionId(meta), "agent-1");
+});
+
+test("extractAgentSessionId falls back to sessionId", () => {
+  assert.equal(
+    extractAgentSessionId({
+      sessionId: "agent-2",
+    }),
+    "agent-2",
+  );
+});
+
+test("extractAgentSessionId prefers agentSessionId over sessionId", () => {
+  assert.equal(
+    extractAgentSessionId({
+      sessionId: "agent-2",
+      agentSessionId: "agent-1",
+    }),
+    "agent-1",
+  );
 });
 
 test("extractAgentSessionId ignores legacy alias keys", () => {
@@ -32,6 +51,7 @@ test("extractAgentSessionId ignores non-string and empty values", () => {
   assert.equal(
     extractAgentSessionId({
       agentSessionId: 123,
+      sessionId: null,
       providerSessionId: null,
       codexSessionId: ["codex"],
       claudeSessionId: "",
