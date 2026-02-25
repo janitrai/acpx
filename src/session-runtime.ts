@@ -1,16 +1,9 @@
-import type {
-  ContentBlock,
-  SessionNotification,
-  StopReason,
-} from "@agentclientprotocol/sdk";
+import type { SessionNotification, StopReason } from "@agentclientprotocol/sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { AcpClient, type AgentLifecycleSnapshot } from "./client.js";
-import {
-  formatErrorMessage,
-  isAcpResourceNotFoundError,
-  normalizeOutputError,
-} from "./error-normalization.js";
+import { AcpClient } from "./client.js";
+import { formatErrorMessage, normalizeOutputError } from "./error-normalization.js";
+import { isAcpResourceNotFoundError } from "./acp-error-shapes.js";
 import {
   QueueOwnerTurnController,
   type QueueOwnerActiveSessionController,
@@ -31,7 +24,6 @@ import {
   trySubmitToRunningOwner,
   waitMs,
 } from "./queue-ipc.js";
-import { normalizeAgentSessionId } from "./agent-session-id.js";
 import {
   DEFAULT_HISTORY_LIMIT,
   absolutePath,
@@ -45,6 +37,13 @@ import {
   resolveSessionRecord,
   writeSessionRecord,
 } from "./session-persistence.js";
+import {
+  appendHistoryEntries,
+  toHistoryEntryFromUpdate,
+  toPreviewText,
+} from "./session-runtime-history.js";
+import { applyLifecycleSnapshotToRecord } from "./session-runtime-lifecycle.js";
+import { connectAndLoadSession } from "./session-runtime-reconnect.js";
 import type {
   AuthPolicy,
   ClientOperation,
@@ -67,8 +66,6 @@ import type {
 
 export const DEFAULT_QUEUE_OWNER_TTL_MS = 300_000;
 const INTERRUPT_CANCEL_WAIT_MS = 2_500;
-const SESSION_HISTORY_MAX_ENTRIES = 500;
-const SESSION_HISTORY_PREVIEW_CHARS = 220;
 
 export class TimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -354,247 +351,11 @@ export function normalizeQueueOwnerTtlMs(ttlMs: number | undefined): number {
   return Math.round(ttlMs);
 }
 
-function collapseWhitespace(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function toPreviewText(value: string): string {
-  const collapsed = collapseWhitespace(value);
-  if (collapsed.length <= SESSION_HISTORY_PREVIEW_CHARS) {
-    return collapsed;
-  }
-  if (SESSION_HISTORY_PREVIEW_CHARS <= 3) {
-    return collapsed.slice(0, SESSION_HISTORY_PREVIEW_CHARS);
-  }
-  return `${collapsed.slice(0, SESSION_HISTORY_PREVIEW_CHARS - 3)}...`;
-}
-
-function textFromContent(content: ContentBlock): string | undefined {
-  if (content.type === "text") {
-    return content.text;
-  }
-  if (content.type === "resource_link") {
-    return content.title ?? content.name ?? content.uri;
-  }
-  if (content.type === "resource") {
-    if ("text" in content.resource && typeof content.resource.text === "string") {
-      return content.resource.text;
-    }
-    return content.resource.uri;
-  }
-  return undefined;
-}
-
-function toHistoryEntryFromUpdate(
-  notification: SessionNotification,
-): SessionHistoryEntry | undefined {
-  const update = notification.update;
-  if (
-    update.sessionUpdate !== "user_message_chunk" &&
-    update.sessionUpdate !== "agent_message_chunk"
-  ) {
-    return undefined;
-  }
-
-  const text = textFromContent(update.content);
-  if (!text) {
-    return undefined;
-  }
-
-  const textPreview = toPreviewText(text);
-  if (!textPreview) {
-    return undefined;
-  }
-
-  return {
-    role: update.sessionUpdate === "user_message_chunk" ? "user" : "assistant",
-    timestamp: isoNow(),
-    textPreview,
-  };
-}
-
-function appendHistoryEntries(
-  current: SessionHistoryEntry[] | undefined,
-  entries: SessionHistoryEntry[],
-): SessionHistoryEntry[] {
-  const base = current ? [...current] : [];
-  for (const entry of entries) {
-    if (!entry.textPreview.trim()) {
-      continue;
-    }
-    base.push(entry);
-  }
-
-  if (base.length <= SESSION_HISTORY_MAX_ENTRIES) {
-    return base;
-  }
-
-  return base.slice(base.length - SESSION_HISTORY_MAX_ENTRIES);
-}
-
-function applyLifecycleSnapshotToRecord(
-  record: SessionRecord,
-  snapshot: AgentLifecycleSnapshot,
-): void {
-  record.pid = snapshot.pid;
-  record.agentStartedAt = snapshot.startedAt;
-
-  if (snapshot.lastExit) {
-    record.lastAgentExitCode = snapshot.lastExit.exitCode;
-    record.lastAgentExitSignal = snapshot.lastExit.signal;
-    record.lastAgentExitAt = snapshot.lastExit.exitedAt;
-    record.lastAgentDisconnectReason = snapshot.lastExit.reason;
-    return;
-  }
-
-  record.lastAgentExitCode = undefined;
-  record.lastAgentExitSignal = undefined;
-  record.lastAgentExitAt = undefined;
-  record.lastAgentDisconnectReason = undefined;
-}
-
-function reconcileAgentSessionId(
-  record: SessionRecord,
-  agentSessionId: string | undefined,
-): void {
-  const normalized = normalizeAgentSessionId(agentSessionId);
-  if (!normalized) {
-    return;
-  }
-
-  record.agentSessionId = normalized;
-}
-
 function shouldFallbackToNewSession(error: unknown): boolean {
   if (error instanceof TimeoutError || error instanceof InterruptedError) {
     return false;
   }
   return isAcpResourceNotFoundError(error);
-}
-
-function loadSessionCandidates(record: SessionRecord): string[] {
-  const candidates = [normalizeAgentSessionId(record.agentSessionId), record.sessionId];
-  const unique: string[] = [];
-
-  for (const candidate of candidates) {
-    if (!candidate || unique.includes(candidate)) {
-      continue;
-    }
-    unique.push(candidate);
-  }
-
-  return unique;
-}
-
-type ConnectAndLoadSessionOptions = {
-  client: AcpClient;
-  record: SessionRecord;
-  timeoutMs?: number;
-  verbose?: boolean;
-  activeController: ActiveSessionController;
-  onClientAvailable?: (controller: ActiveSessionController) => void;
-  onConnectedRecord?: (record: SessionRecord) => void;
-  onSessionIdResolved?: (sessionId: string) => void;
-};
-
-type ConnectAndLoadSessionResult = {
-  sessionId: string;
-  agentSessionId?: string;
-  resumed: boolean;
-  loadError?: string;
-};
-
-async function connectAndLoadSession(
-  options: ConnectAndLoadSessionOptions,
-): Promise<ConnectAndLoadSessionResult> {
-  const record = options.record;
-  const client = options.client;
-  const storedProcessAlive = isProcessAlive(record.pid);
-  const shouldReconnect = Boolean(record.pid) && !storedProcessAlive;
-
-  if (options.verbose) {
-    if (storedProcessAlive) {
-      process.stderr.write(
-        `[acpx] saved session pid ${record.pid} is running; reconnecting with loadSession\n`,
-      );
-    } else if (shouldReconnect) {
-      process.stderr.write(
-        `[acpx] saved session pid ${record.pid} is dead; respawning agent and attempting session/load\n`,
-      );
-    }
-  }
-
-  await withTimeout(client.start(), options.timeoutMs);
-  options.onClientAvailable?.(options.activeController);
-  applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
-  record.closed = false;
-  record.closedAt = undefined;
-  options.onConnectedRecord?.(record);
-  await writeSessionRecord(record);
-
-  let resumed = false;
-  let loadError: string | undefined;
-  let sessionId = record.sessionId;
-
-  if (client.supportsLoadSession()) {
-    const candidates = loadSessionCandidates(record);
-    for (const candidate of candidates) {
-      if (options.verbose && candidates.length > 1) {
-        process.stderr.write(`[acpx] attempting session/load with ${candidate}\n`);
-      }
-
-      try {
-        const loadResult = await withTimeout(
-          client.loadSessionWithOptions(candidate, record.cwd, {
-            suppressReplayUpdates: true,
-          }),
-          options.timeoutMs,
-        );
-        reconcileAgentSessionId(record, loadResult.agentSessionId);
-        resumed = true;
-        sessionId = candidate;
-        loadError = undefined;
-        break;
-      } catch (error) {
-        loadError = formatErrorMessage(error);
-        if (!shouldFallbackToNewSession(error)) {
-          throw error;
-        }
-        if (options.verbose) {
-          process.stderr.write(
-            `[acpx] session/load failed for ${candidate}: ${loadError}\n`,
-          );
-        }
-      }
-    }
-
-    if (!resumed) {
-      const createdSession = await withTimeout(
-        client.createSession(record.cwd),
-        options.timeoutMs,
-      );
-      sessionId = createdSession.sessionId;
-      record.sessionId = sessionId;
-      reconcileAgentSessionId(record, createdSession.agentSessionId);
-    }
-  } else {
-    const createdSession = await withTimeout(
-      client.createSession(record.cwd),
-      options.timeoutMs,
-    );
-    sessionId = createdSession.sessionId;
-    record.sessionId = sessionId;
-    reconcileAgentSessionId(record, createdSession.agentSessionId);
-  }
-
-  options.onSessionIdResolved?.(sessionId);
-
-  return {
-    sessionId,
-    agentSessionId: record.agentSessionId,
-    resumed,
-    loadError,
-  };
 }
 
 async function runQueuedTask(
@@ -728,6 +489,8 @@ async function runSessionPrompt(
           timeoutMs: options.timeoutMs,
           verbose: options.verbose,
           activeController,
+          withTimeout,
+          shouldFallbackToNewSession,
           onClientAvailable: (controller) => {
             options.onClientAvailable?.(controller);
             notifiedClientAvailable = true;
@@ -892,6 +655,8 @@ async function withConnectedSession<T>(
           timeoutMs: options.timeoutMs,
           verbose: options.verbose,
           activeController,
+          withTimeout,
+          shouldFallbackToNewSession,
           onClientAvailable: (controller) => {
             options.onClientAvailable?.(controller);
             notifiedClientAvailable = true;

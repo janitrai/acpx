@@ -1192,13 +1192,93 @@ type CliRunOptions = {
   cwd?: string;
 };
 
+const LONG_OPTIONS_WITH_VALUE = new Set([
+  "--cwd",
+  "--auth-policy",
+  "--non-interactive-permissions",
+  "--format",
+  "--timeout",
+  "--ttl",
+  "--agent",
+  "--file",
+]);
+const SHORT_OPTIONS_WITH_VALUE = new Set(["-s", "-f"]);
+
+function collectPositionalArgs(args: string[]): string[] {
+  const positionals: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--") {
+      positionals.push(...args.slice(index + 1));
+      break;
+    }
+    if (token.startsWith("--")) {
+      if (!token.includes("=") && LONG_OPTIONS_WITH_VALUE.has(token)) {
+        index += 1;
+      }
+      continue;
+    }
+    if (token.startsWith("-") && token.length > 1) {
+      if (SHORT_OPTIONS_WITH_VALUE.has(token)) {
+        index += 1;
+      }
+      continue;
+    }
+    positionals.push(token);
+  }
+
+  return positionals;
+}
+
+function shouldInjectPromptTtl(args: string[]): boolean {
+  if (args.some((arg) => arg === "--ttl" || arg.startsWith("--ttl="))) {
+    return false;
+  }
+
+  const positionals = collectPositionalArgs(args);
+  if (positionals.length === 0) {
+    return false;
+  }
+
+  const nonPromptCommands = new Set([
+    "sessions",
+    "status",
+    "set-mode",
+    "set",
+    "cancel",
+    "exec",
+    "config",
+  ]);
+  const [first, second] = positionals;
+
+  if (first === "prompt") {
+    return true;
+  }
+  if (nonPromptCommands.has(first)) {
+    return false;
+  }
+  if (second === "prompt") {
+    return true;
+  }
+  if (second && nonPromptCommands.has(second)) {
+    return false;
+  }
+
+  // Agent + free-form prompt path.
+  return positionals.length >= 2;
+}
+
 async function runCli(
   args: string[],
   homeDir: string,
   options: CliRunOptions = {},
 ): Promise<CliRunResult> {
+  const normalizedArgs = shouldInjectPromptTtl(args)
+    ? ["--ttl", "0.01", ...args]
+    : args;
   return await new Promise<CliRunResult>((resolve) => {
-    const child = spawn(process.execPath, [CLI_PATH, ...args], {
+    const child = spawn(process.execPath, [CLI_PATH, ...normalizedArgs], {
       env: {
         ...process.env,
         HOME: homeDir,

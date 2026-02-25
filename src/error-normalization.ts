@@ -3,6 +3,7 @@ import {
   PermissionDeniedError,
   PermissionPromptUnavailableError,
 } from "./errors.js";
+import { extractAcpError, isAcpResourceNotFoundError } from "./acp-error-shapes.js";
 import {
   EXIT_CODES,
   OUTPUT_ERROR_CODES,
@@ -13,8 +14,9 @@ import {
   type OutputErrorOrigin,
 } from "./types.js";
 
-const RESOURCE_NOT_FOUND_ACP_CODES = new Set([-32001, -32002]);
 const AUTH_REQUIRED_ACP_CODES = new Set([-32000]);
+
+export { extractAcpError, isAcpResourceNotFoundError } from "./acp-error-shapes.js";
 
 type ErrorMeta = {
   outputCode?: OutputErrorCode;
@@ -157,84 +159,12 @@ function toAcpErrorPayload(value: unknown): OutputErrorAcpPayload | undefined {
   };
 }
 
-function extractAcpErrorInternal(
-  value: unknown,
-  depth: number,
-): OutputErrorAcpPayload | undefined {
-  if (depth > 5) {
-    return undefined;
-  }
-
-  const direct = toAcpErrorPayload(value);
-  if (direct) {
-    return direct;
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return undefined;
-  }
-
-  if ("error" in record) {
-    const nested = extractAcpErrorInternal(record.error, depth + 1);
-    if (nested) {
-      return nested;
-    }
-  }
-
-  if ("cause" in record) {
-    const nested = extractAcpErrorInternal(record.cause, depth + 1);
-    if (nested) {
-      return nested;
-    }
-  }
-
-  return undefined;
-}
-
 function isTimeoutLike(error: unknown): boolean {
   return error instanceof Error && error.name === "TimeoutError";
 }
 
 function isNoSessionLike(error: unknown): boolean {
   return error instanceof Error && error.name === "NoSessionError";
-}
-
-function isSessionNotFoundText(value: unknown): boolean {
-  if (typeof value !== "string") {
-    return false;
-  }
-
-  const normalized = value.toLowerCase();
-  return (
-    normalized.includes("resource_not_found") ||
-    normalized.includes("resource not found") ||
-    normalized.includes("session not found") ||
-    normalized.includes("unknown session")
-  );
-}
-
-function hasSessionNotFoundHint(value: unknown, depth = 0): boolean {
-  if (depth > 4) {
-    return false;
-  }
-
-  if (isSessionNotFoundText(value)) {
-    return true;
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasSessionNotFoundHint(entry, depth + 1));
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return false;
-  }
-
-  return Object.values(record).some((entry) =>
-    hasSessionNotFoundHint(entry, depth + 1),
-  );
 }
 
 function isUsageLike(error: unknown): boolean {
@@ -267,28 +197,6 @@ export function formatErrorMessage(error: unknown): string {
   }
 
   return String(error);
-}
-
-export function extractAcpError(error: unknown): OutputErrorAcpPayload | undefined {
-  return extractAcpErrorInternal(error, 0);
-}
-
-export function isAcpResourceNotFoundError(error: unknown): boolean {
-  const acp = extractAcpError(error);
-  if (acp && RESOURCE_NOT_FOUND_ACP_CODES.has(acp.code)) {
-    return true;
-  }
-
-  if (acp) {
-    if (isSessionNotFoundText(acp.message)) {
-      return true;
-    }
-    if (hasSessionNotFoundHint(acp.data)) {
-      return true;
-    }
-  }
-
-  return isSessionNotFoundText(formatErrorMessage(error));
 }
 
 function mapErrorCode(error: unknown): OutputErrorCode | undefined {

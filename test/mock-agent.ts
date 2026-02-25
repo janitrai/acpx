@@ -214,9 +214,18 @@ const META_FLAG_SPECS: Record<string, MetaFlagSpec> = {
     target: "newSessionMeta",
     key: "agentSessionId",
   },
+  "--meta-session-id": {
+    target: "newSessionMeta",
+    key: "sessionId",
+  },
   "--load-agent-session-id": {
     target: "loadSessionMeta",
     key: "agentSessionId",
+    supportsLoadSession: true,
+  },
+  "--load-meta-session-id": {
+    target: "loadSessionMeta",
+    key: "sessionId",
     supportsLoadSession: true,
   },
 };
