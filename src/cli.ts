@@ -37,6 +37,7 @@ import {
   isProcessAlive,
   listSessionsForAgent,
   runOnce,
+  runQueueOwnerProcess,
   setSessionConfigOption,
   setSessionMode,
   sendSession,
@@ -47,6 +48,7 @@ import {
   EXIT_CODES,
   NON_INTERACTIVE_PERMISSION_POLICIES,
   OUTPUT_FORMATS,
+  PERMISSION_MODES,
   type NonInteractivePermissionPolicy,
   type AuthPolicy,
   type OutputFormat,
@@ -102,7 +104,19 @@ type StatusFlags = {
   session?: string;
 };
 
+type QueueOwnerFlags = {
+  sessionId: string;
+  ttlMs: number;
+  permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
+  authPolicy?: AuthPolicy;
+  timeoutMs?: number;
+  verbose?: boolean;
+  suppressSdkConsoleErrors?: boolean;
+};
+
 const TOP_LEVEL_VERBS = new Set([
+  "__queue-owner",
   "prompt",
   "exec",
   "cancel",
@@ -153,6 +167,31 @@ function parseTimeoutSeconds(value: string): number {
     throw new InvalidArgumentError("Timeout must be a positive number of seconds");
   }
   return Math.round(parsed * 1000);
+}
+
+function parseTimeoutMilliseconds(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new InvalidArgumentError("Timeout must be a positive number of milliseconds");
+  }
+  return Math.round(parsed);
+}
+
+function parseNonNegativeMilliseconds(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new InvalidArgumentError("TTL must be a non-negative number of milliseconds");
+  }
+  return Math.round(parsed);
+}
+
+function parsePermissionMode(value: string): PermissionMode {
+  if (!PERMISSION_MODES.includes(value as PermissionMode)) {
+    throw new InvalidArgumentError(
+      `Invalid permission mode "${value}". Expected one of: ${PERMISSION_MODES.join(", ")}`,
+    );
+  }
+  return value as PermissionMode;
 }
 
 export function parseTtlSeconds(value: string): number {
@@ -1770,6 +1809,108 @@ function detectJsonStrict(argv: string[]): boolean {
   return false;
 }
 
+function parseQueueOwnerFlags(argv: string[]): QueueOwnerFlags | undefined {
+  if (argv[0] !== "__queue-owner") {
+    return undefined;
+  }
+
+  const flags: Partial<QueueOwnerFlags> = {
+    ttlMs: DEFAULT_QUEUE_OWNER_TTL_MS,
+  };
+
+  const consumeValue = (
+    index: number,
+    token: string,
+  ): { value: string; next: number } => {
+    if (token.includes("=")) {
+      return {
+        value: token.slice(token.indexOf("=") + 1),
+        next: index,
+      };
+    }
+    const value = argv[index + 1];
+    if (!value || value.startsWith("-")) {
+      throw new InvalidArgumentError(`${token} requires a value`);
+    }
+    return {
+      value,
+      next: index + 1,
+    };
+  };
+
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--session-id" || token.startsWith("--session-id=")) {
+      const consumed = consumeValue(index, token);
+      flags.sessionId = parseNonEmptyValue("Session id", consumed.value);
+      index = consumed.next;
+      continue;
+    }
+    if (token === "--ttl-ms" || token.startsWith("--ttl-ms=")) {
+      const consumed = consumeValue(index, token);
+      flags.ttlMs = parseNonNegativeMilliseconds(consumed.value);
+      index = consumed.next;
+      continue;
+    }
+    if (token === "--permission-mode" || token.startsWith("--permission-mode=")) {
+      const consumed = consumeValue(index, token);
+      flags.permissionMode = parsePermissionMode(consumed.value);
+      index = consumed.next;
+      continue;
+    }
+    if (
+      token === "--non-interactive-permissions" ||
+      token.startsWith("--non-interactive-permissions=")
+    ) {
+      const consumed = consumeValue(index, token);
+      flags.nonInteractivePermissions = parseNonInteractivePermissionPolicy(
+        consumed.value,
+      );
+      index = consumed.next;
+      continue;
+    }
+    if (token === "--auth-policy" || token.startsWith("--auth-policy=")) {
+      const consumed = consumeValue(index, token);
+      flags.authPolicy = parseAuthPolicy(consumed.value);
+      index = consumed.next;
+      continue;
+    }
+    if (token === "--timeout-ms" || token.startsWith("--timeout-ms=")) {
+      const consumed = consumeValue(index, token);
+      flags.timeoutMs = parseTimeoutMilliseconds(consumed.value);
+      index = consumed.next;
+      continue;
+    }
+    if (token === "--verbose") {
+      flags.verbose = true;
+      continue;
+    }
+    if (token === "--suppress-sdk-console-errors") {
+      flags.suppressSdkConsoleErrors = true;
+      continue;
+    }
+    throw new InvalidArgumentError(`Unknown __queue-owner option: ${token}`);
+  }
+
+  if (!flags.sessionId) {
+    throw new InvalidArgumentError("__queue-owner requires --session-id");
+  }
+  if (!flags.permissionMode) {
+    throw new InvalidArgumentError("__queue-owner requires --permission-mode");
+  }
+
+  return {
+    sessionId: flags.sessionId,
+    ttlMs: flags.ttlMs ?? DEFAULT_QUEUE_OWNER_TTL_MS,
+    permissionMode: flags.permissionMode,
+    nonInteractivePermissions: flags.nonInteractivePermissions,
+    authPolicy: flags.authPolicy,
+    timeoutMs: flags.timeoutMs,
+    verbose: flags.verbose,
+    suppressSdkConsoleErrors: flags.suppressSdkConsoleErrors,
+  };
+}
+
 function emitJsonErrorEvent(error: NormalizedOutputError): void {
   const formatter = createOutputFormatter("json", {
     jsonContext: {
@@ -1826,6 +1967,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     requestedOutputFormat,
     requestedJsonStrict,
   );
+  const internalQueueOwnerFlags = parseQueueOwnerFlags(argv.slice(2));
   const builtInAgents = listBuiltInAgents(config.agents);
 
   const program = new Command();
@@ -1913,6 +2055,21 @@ Examples:
 
   await runWithOutputPolicy(requestedOutputPolicy, async () => {
     try {
+      if (internalQueueOwnerFlags) {
+        await runQueueOwnerProcess({
+          sessionId: internalQueueOwnerFlags.sessionId,
+          ttlMs: internalQueueOwnerFlags.ttlMs,
+          permissionMode: internalQueueOwnerFlags.permissionMode,
+          nonInteractivePermissions: internalQueueOwnerFlags.nonInteractivePermissions,
+          authCredentials: config.auth,
+          authPolicy: internalQueueOwnerFlags.authPolicy,
+          timeoutMs: internalQueueOwnerFlags.timeoutMs,
+          suppressSdkConsoleErrors: internalQueueOwnerFlags.suppressSdkConsoleErrors,
+          verbose: internalQueueOwnerFlags.verbose,
+        });
+        return;
+      }
+
       await program.parseAsync(argv);
     } catch (error) {
       if (error instanceof CommanderError) {

@@ -55,9 +55,7 @@ function shouldInjectPromptTtl(args: string[]): boolean {
 }
 
 export async function runCli(args: string[], homeDir: string): Promise<CliRunResult> {
-  const normalizedArgs = shouldInjectPromptTtl(args)
-    ? ["--ttl", "0.01", ...args]
-    : args;
+  const normalizedArgs = shouldInjectPromptTtl(args) ? ["--ttl", "1", ...args] : args;
   return await new Promise<CliRunResult>((resolve) => {
     const child = spawn(process.execPath, [CLI_PATH, ...normalizedArgs], {
       env: {
