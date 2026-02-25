@@ -1,6 +1,6 @@
 {
   "name": "acpx",
-  "version": "0.1.3",
+  "version": "0.1.0",
   "description": "Headless CLI client for the Agent Client Protocol (ACP) — talk to coding agents from the command line",
   "type": "module",
   "files": [
