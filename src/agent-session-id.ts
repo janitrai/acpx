@@ -1,4 +1,4 @@
-const AGENT_SESSION_ID_META_KEYS = ["agentSessionId"] as const;
+const AGENT_SESSION_ID_META_KEYS = ["agentSessionId", "sessionId"] as const;
 
 export function normalizeAgentSessionId(value: unknown): string | undefined {
   if (typeof value !== "string") {
