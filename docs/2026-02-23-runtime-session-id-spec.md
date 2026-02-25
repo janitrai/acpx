@@ -2,166 +2,167 @@
 
 Status: Draft
 Owner: acpx
-Last updated: 2026-02-23
+Last updated: 2026-02-25
 
 ## Context
 
-`acpx sessions ensure --format json` currently returns:
+`acpx` currently exposes overlapping session identifiers (`id` and `sessionId`) and an optional runtime/provider identifier (`runtimeSessionId`).
 
-- `id`
-- `sessionId`
-- `name`
-- `created`
+This naming is ambiguous for orchestrators and users who need to reason about:
 
-In current acpx behavior, `id` and `sessionId` are identical because acpx persists one identifier for both record identity and ACP session identity.
-
-For orchestrators (for example OpenClaw), this is not enough to distinguish:
-
-- acpx record/session identity
-- runtime/provider-native identity (for example Codex/Claude internal session id) when available
+- stable local record identity
+- ACP wire/session identity
+- inner harness/provider identity
 
 ## Problem Statement
 
-When adapters expose an additional runtime/provider session identifier, acpx cannot currently preserve and expose it.
+Current naming causes confusion and duplicate-looking values in downstream UX.
 
-This causes downstream UX to show duplicated values and prevents precise diagnostics across layers.
+When reconnect or fallback creates a new ACP session for an existing local record, the distinction is real, but not clearly named.
 
 ## Goals
 
-1. Add first-class support for an optional runtime/provider session identifier.
-2. Preserve backward compatibility for existing acpx consumers.
-3. Keep behavior deterministic when runtime id is unavailable.
-4. Avoid brittle scraping (logs, PTY parsing, out-of-band files).
+1. Define explicit, unambiguous identifier names.
+2. Keep behavior deterministic when inner harness id is unavailable.
+3. Preserve resilience flows (load/reconnect/fallback) without identity confusion.
+4. Keep adapter integration harness-agnostic.
 
 ## Non-Goals
 
-1. Inventing a runtime/provider id when adapter does not expose one.
-2. Requiring ACP spec changes for v1.
-3. Changing existing `id` semantics for acpx record lookup.
+1. Inventing an inner harness id when adapter does not expose one.
+2. Requiring ACP spec changes.
+3. Changing session lifecycle semantics.
 
-## Proposed Data Model
+## Canonical Identity Model
 
-### SessionRecord
+### SessionRecord fields
 
-Extend `SessionRecord` with an optional field:
-
-- `runtimeSessionId?: string`
+- `acpxRecordId: string`
+- `acpxSessionId: string`
+- `agentSessionId?: string`
 
 Semantics:
 
-- `id`: acpx record id (stable local record key)
-- `sessionId`: ACP session id used for ACP method calls
-- `runtimeSessionId`: provider/runtime-native id if exposed via ACP metadata
+- `acpxRecordId`: stable acpx local record key.
+- `acpxSessionId`: ACP session id used for ACP method calls.
+- `agentSessionId`: inner provider/harness session id (Codex/Claude/etc.) when exposed via adapter metadata.
 
-### Output JSON
+### Stability rules
 
-Include optional `runtimeSessionId` in JSON payloads when known:
+1. `acpxRecordId` SHOULD remain stable for the life of the local record.
+2. `acpxSessionId` SHOULD remain stable while ACP `session/load` succeeds.
+3. `acpxSessionId` MAY change if acpx must create a fresh ACP session after load/reconnect failure.
+4. `agentSessionId` is optional and MUST NOT be synthesized.
+
+## Output JSON Contract
+
+JSON outputs should use canonical names:
 
 - `sessions new --format json`
 - `sessions ensure --format json`
 - `status --format json`
-- `sessions show --format json` (already full record; ensure field is present)
+- `sessions show --format json`
 
-If unknown, omit field (do not emit null/placeholder).
+Rules:
 
-## Source of Truth for runtimeSessionId
+1. Always include `acpxRecordId` and `acpxSessionId`.
+2. Include `agentSessionId` only when known.
+3. Do not emit null placeholders for unknown optional ids.
 
-acpx SHOULD extract runtime/provider id from ACP `_meta` on session setup responses:
+## Source of Truth for agentSessionId
+
+acpx should extract `agentSessionId` from ACP `_meta` on session setup responses:
 
 - `newSession` response `_meta`
-- if available, `loadSession` response `_meta` for reconciliation
+- `loadSession` response `_meta` for reconciliation (when available)
 
-### Metadata key contract
+### Metadata key precedence
 
-For interoperability, acpx will support this precedence list:
+Use first non-empty string from:
 
-1. `_meta.runtimeSessionId`
-2. `_meta.providerSessionId`
-3. `_meta.codexSessionId`
-4. `_meta.claudeSessionId`
+1. `_meta.agentSessionId`
+2. `_meta.runtimeSessionId`
+3. `_meta.providerSessionId`
+4. `_meta.codexSessionId`
+5. `_meta.claudeSessionId`
 
 Notes:
 
-- Keys are optional.
-- First non-empty string wins.
-- Unknown keys are ignored.
-- This does not block future ACP standardization.
+- This keeps adapter compatibility while converging on one canonical output field.
+- Adapter-specific keys remain accepted as input aliases.
 
 ## Behavioral Requirements
 
-1. acpx MUST keep existing behavior for `id` and `sessionId`.
-2. acpx MUST persist `runtimeSessionId` when discovered.
-3. acpx MUST NOT fail session creation/loading if runtime id is absent.
-4. acpx SHOULD update stored `runtimeSessionId` on later session attach if newly discovered.
-5. acpx SHOULD preserve an existing `runtimeSessionId` unless a new non-empty value is provided.
+1. acpx MUST persist `acpxRecordId` and `acpxSessionId`.
+2. acpx MUST persist `agentSessionId` when discovered.
+3. acpx MUST NOT fail session creation/loading if `agentSessionId` is absent.
+4. acpx SHOULD update stored `agentSessionId` on later attach if newly discovered.
+5. acpx SHOULD preserve existing non-empty `agentSessionId` unless replaced by a new non-empty value.
 
 ## Implementation Plan (acpx)
 
 1. Types
-   - Add `runtimeSessionId?: string` to `SessionRecord`.
+   - Rename session identity fields to canonical names in types and persistence interfaces.
 
 2. Client layer
-   - Change `AcpClient#createSession` to return a structured object, not bare string:
-     - `{ sessionId: string; runtimeSessionId?: string }`
-   - Parse `_meta` with precedence list.
+   - Return structured session identity with canonical names.
+   - Normalize `_meta` keys into `agentSessionId`.
 
 3. Session runtime
-   - Update `createSession(...)` flow to persist `runtimeSessionId`.
-   - Update reconnect/load paths to reconcile runtime id when metadata is available.
+   - Persist canonical fields during create/load/reconnect flows.
+   - Keep record/session divergence behavior explicit and intentional.
 
 4. CLI JSON output
-   - Add optional `runtimeSessionId` in JSON event payloads for `sessions new`, `sessions ensure`, and `status`.
+   - Emit `acpxRecordId`, `acpxSessionId`, optional `agentSessionId`.
+   - Remove ambiguous `id`/`sessionId` naming from JSON outputs.
 
-5. Persistence/migration
-   - No migration required.
-   - Existing session files remain valid; field is optional.
+5. Persistence migration
+   - Read legacy files (`id`, `sessionId`, `runtimeSessionId`) and normalize in-memory.
+   - Write canonical fields on next save.
 
 ## Test Plan
 
 1. Unit: metadata parsing
-   - `_meta.runtimeSessionId` maps correctly.
-   - precedence order is respected.
+   - precedence order resolves to `agentSessionId`.
    - empty/non-string values are ignored.
 
-2. Unit: session persistence
-   - record writes include `runtimeSessionId` when present.
-   - existing records without field load unchanged.
+2. Unit: persistence and migration
+   - legacy files load and normalize correctly.
+   - canonical fields write correctly.
 
 3. CLI tests (json mode)
-   - `sessions new` emits `runtimeSessionId` when available.
-   - `sessions ensure` emits `runtimeSessionId` when available.
-   - `status` emits `runtimeSessionId` from stored record.
+   - `sessions new` emits canonical identity fields.
+   - `sessions ensure` emits canonical identity fields.
+   - `status` emits canonical identity fields from stored record.
 
 4. Regression
-   - all existing text/quiet outputs unchanged.
-   - all existing code paths pass when runtime id is absent.
+   - fallback/reconnect flows still work when `acpxSessionId` changes and `acpxRecordId` remains stable.
+   - behavior remains correct when `agentSessionId` is absent.
 
 ## OpenClaw Integration Impact
 
-No protocol break is required.
+OpenClaw should consume:
 
-OpenClaw can consume:
+- `acpxRecordId` as backend/local acpx identity
+- `acpxSessionId` as ACP wire/session identity
+- `agentSessionId` as inner harness identity when present
 
-- `sessionId` as ACP id
-- `id` as acpx id
-- `runtimeSessionId` as inner/provider id (when present)
-
-If `runtimeSessionId` is absent, OpenClaw should avoid implying a separate inner id.
+If `agentSessionId` is absent, UX should avoid implying a distinct inner session id.
 
 ## Rollout
 
-1. Implement field + JSON outputs in acpx.
-2. Release acpx.
-3. Update OpenClaw ACP runtime adapter to prefer `runtimeSessionId` from acpx output.
-4. In OpenClaw thread intros, suppress duplicate lines when two IDs are equal.
+1. Implement canonical naming in acpx internals and JSON outputs.
+2. Add legacy-read compatibility for existing session files.
+3. Update OpenClaw acpx runtime parser to read canonical fields.
+4. Remove legacy field usage from tests/docs after transition is complete.
 
 ## Risks
 
 1. Adapter metadata key variance.
-   - Mitigation: precedence list + optional field.
+   - Mitigation: precedence + alias support.
 
-2. Consumers assuming `id === sessionId` forever.
-   - Mitigation: compatibility maintained; only additive optional field.
+2. Downstream consumers pinned to old JSON field names.
+   - Mitigation: short compatibility window with documented migration.
 
-3. False confidence when adapter provides no runtime id.
-   - Mitigation: explicit optional semantics and no synthetic IDs.
+3. False confidence when adapter provides no inner id.
+   - Mitigation: optional semantics; no synthetic ids.

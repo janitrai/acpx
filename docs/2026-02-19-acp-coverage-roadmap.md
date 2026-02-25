@@ -1,32 +1,60 @@
 ---
-title: ACP Spec Coverage Roadmap
+title: ACP Spec Coverage
 author: Bob <bob@dutifulbob.com>
 date: 2026-02-19
 ---
 
-# ACP Spec Coverage Roadmap
+# ACP Spec Coverage
 
-What acpx implements from the ACP spec today, what's missing, and the plan to
-close the gaps.
+What acpx implements from the ACP spec today and what is not yet implemented.
 
-## Current State (v0.1.x)
+## Supported Now
 
-acpx implements the core prompt loop and session lifecycle. Enough to be a useful
-CLI client for Codex, Claude, Gemini, OpenCode, and Pi.
+| ACP Method                   | acpx Feature                                     | Supported |
+| ---------------------------- | ------------------------------------------------ | --------- |
+| `initialize`                 | Handshake, capability negotiation                | yes       |
+| `session/new`                | `sessions new`                                   | yes       |
+| `session/load`               | Crash resume / reconnect                         | yes       |
+| `session/prompt`             | `prompt`, `exec`, implicit prompt                | yes       |
+| `session/update`             | Streaming output (thinking, tools, text, diffs)  | yes       |
+| `session/cancel`             | Graceful cancel + `acpx <agent> cancel`          | yes       |
+| `session/request_permission` | `--approve-all`, `--approve-reads`, `--deny-all` | yes       |
+| `session/set_mode`           | `acpx <agent> set-mode <mode>`                   | yes       |
+| `session/set_config_option`  | `acpx <agent> set <key> <value>`                 | yes       |
+| `fs/read_text_file`          | ACP client file read handler                     | yes       |
+| `fs/write_text_file`         | ACP client file write handler                    | yes       |
+| `terminal/create`            | ACP client terminal spawn handler                | yes       |
+| `terminal/output`            | ACP client terminal output handler               | yes       |
+| `terminal/wait_for_exit`     | ACP client terminal wait handler                 | yes       |
+| `terminal/kill`              | ACP client terminal kill handler                 | yes       |
+| `terminal/release`           | ACP client terminal release handler              | yes       |
+| `authenticate`               | Auth handshake handling                          | yes       |
 
-### Implemented
+### Supported Behavior Notes
 
-| ACP Method                   | acpx Feature                                     | Since  |
-| ---------------------------- | ------------------------------------------------ | ------ |
-| `initialize`                 | Handshake, capability negotiation                | v0.1.0 |
-| `session/new`                | `sessions new`                                   | v0.1.0 |
-| `session/load`               | Crash resume / reconnect                         | v0.1.0 |
-| `session/prompt`             | `prompt`, `exec`, implicit prompt                | v0.1.0 |
-| `session/update`             | Streaming output (thinking, tools, text, diffs)  | v0.1.0 |
-| `session/cancel`             | Graceful cancel on SIGINT                        | v0.1.4 |
-| `session/request_permission` | `--approve-all`, `--approve-reads`, `--deny-all` | v0.1.0 |
+#### Session cancel and controls
 
-### Not Implemented
+- `acpx <agent> cancel` sends `session/cancel` through the queue path and keeps the session alive for follow-up prompts.
+- This is intentionally different from process-level SIGINT behavior, which can tear down the running process.
+- `session/set_mode` and `session/set_config_option` are exposed as `set-mode` and `set` commands and return agent-side validation errors when invalid.
+
+#### Filesystem client methods
+
+- acpx handles `fs/read_text_file` and `fs/write_text_file` as client-authority operations.
+- Permission behavior follows selected mode (`--approve-all`, `--approve-reads`, `--deny-all`).
+- Path sandboxing is applied to keep file operations scoped to cwd by default.
+
+#### Terminal client methods
+
+- acpx handles full terminal lifecycle: create, output, wait_for_exit, kill, release.
+- The implementation includes process tracking, output buffering, and cleanup behavior for terminal IDs.
+
+#### Authentication
+
+- acpx handles `authenticate` when adapters request it.
+- This keeps compatibility with adapters that rely on ACP auth handshake rather than out-of-band environment setup.
+
+## Not Yet Supported
 
 | ACP Method          | What it does                        | Spec status |
 | ------------------- | ----------------------------------- | ----------- |
@@ -36,89 +64,15 @@ CLI client for Codex, Claude, Gemini, OpenCode, and Pi.
 | `session/set_model` | Change model mid-session            | unstable    |
 | `$/cancel_request`  | Cancel any pending JSON-RPC request | unstable    |
 
-## Roadmap
+### Not Yet Supported Notes
 
-### Tier 1 — Cancel and Control (next release)
+- `session/fork`: would allow branching one conversation into parallel alternatives.
+- `session/list`: would expose adapter-side session inventory in addition to acpx local store listing.
+- `session/resume`: distinct from `session/load`; expected to support resume semantics without replay-like behavior.
+- `session/set_model`: mid-session model switching command surface.
+- `$/cancel_request`: transport-level JSON-RPC cancellation beyond session-scoped cancel.
 
-In-flight prompt management. Users need to stop generation and redirect without
-killing the session.
-
-- [x] **`acpx <agent> cancel`** — Send `session/cancel` to the running turn via
-      the queue socket. Agent stops generating, session stays alive, ready for next
-      prompt immediately. This is different from SIGINT (which tears down the process);
-      cancel is cooperative and keeps the connection open.
-- [x] **`session/set_mode`** — `acpx <agent> set-mode <mode>`. Agents advertise
-      supported modes in their capabilities. Codex supports `plan` vs `execute` (or
-      equivalent). Simple JSON-RPC call, response is ack.
-- [x] **`session/set_config_option`** — `acpx <agent> set <key> <value>`. Pass
-      arbitrary config to the agent (temperature, max tokens, etc.). Agent validates,
-      returns ack or error.
-
-### Tier 2 — Filesystem Client Methods
-
-The agent asks acpx (the client) to read/write files on its behalf. Today agents
-handle their own filesystem access, but the ACP spec envisions the client as the
-filesystem authority — the agent requests, the client decides.
-
-This matters for:
-
-- Sandboxed agents that can't touch the filesystem directly
-- Fine-grained permission control (allow reads to `src/`, deny writes to `.env`)
-- Audit logging of all file operations
-
-Implementation:
-
-- [x] **`fs/read_text_file`** — Agent sends path, client reads and returns content.
-      Respect permission mode: `--approve-reads` allows automatically, `--deny-all`
-      rejects. Could add path-based policies later.
-- [x] **`fs/write_text_file`** — Agent sends path + content, client writes. Always
-      requires permission unless `--approve-all`. Show diff preview before approving.
-- [x] Path sandboxing: restrict reads/writes to cwd subtree by default.
-
-### Tier 3 — Terminal Client Methods
-
-The agent asks acpx to manage terminal processes. Same philosophy as filesystem:
-the client is the execution authority.
-
-- [x] **`terminal/create`** — Agent requests a command to run. Client spawns the
-      process, returns a terminal ID. Permission check: similar to tool call approval.
-- [x] **`terminal/output`** — Agent polls for terminal stdout/stderr. Client returns
-      buffered output.
-- [x] **`terminal/wait_for_exit`** — Agent blocks until terminal exits. Client
-      returns exit code.
-- [x] **`terminal/kill`** — Agent requests termination of a running terminal.
-- [x] **`terminal/release`** — Agent releases terminal resources.
-
-This is the heaviest lift. Requires:
-
-- Terminal process lifecycle manager (spawn, track, buffer output, reap)
-- Terminal ID allocation and cleanup
-- Timeout handling for hung processes
-- Integration with permission system
-
-### Tier 4 — Authentication
-
-- [x] **`authenticate`** — Handle auth handshake. Agent tells client what auth
-      it needs (API key, OAuth token, etc.), client provides it. Today agents manage
-      their own auth (env vars, config files). This would let acpx be the auth broker.
-      Lower priority because current agents work fine without it.
-
-### Tier 5 — Unstable / Future
-
-Only implement these once they stabilize in the spec:
-
-- [ ] **`session/fork`** — Branch a session. Use case: try two approaches in
-      parallel. Would create two session files from one.
-- [ ] **`session/list`** — Server-side session listing. We already have client-side
-      `sessions list`; this would query the agent for its view.
-- [ ] **`session/resume`** — Resume a paused session (different from `session/load`
-      which replays history).
-- [ ] **`session/set_model`** — `acpx <agent> set-model <model>`. Switch models
-      mid-conversation.
-- [ ] **`$/cancel_request`** — Cancel any pending JSON-RPC request by ID. More
-      granular than `session/cancel`.
-
-## Non-ACP Features
+## ACP-Adjacent Features Not Yet Supported
 
 Things acpx needs that aren't in the ACP spec:
 
@@ -131,16 +85,3 @@ writes to .env`). Beyond the current all-or-nothing modes.
 - [ ] **Session export/import** — Move sessions between machines.
 - [ ] **Watch mode** — Re-run prompt on file changes.
 - [ ] **Cost/token tracking** — Surface usage stats when agents/ACP expose them.
-
-## Release Mapping
-
-| Release | Tier       | Key Features                                                                                |
-| ------- | ---------- | ------------------------------------------------------------------------------------------- |
-| v0.2.0  | current    | Config file, graceful cancel, crash resume, stdin/file input, session history, agent status |
-| v0.3.0  | Tier 1     | `cancel` command, `set-mode`, `set-config-option`                                           |
-| v0.4.0  | Tier 2     | `fs/read_text_file`, `fs/write_text_file`, path sandboxing                                  |
-| v0.5.0  | Tier 3     | Terminal client methods (create, output, wait, kill, release)                               |
-| v0.6.0  | Tier 4     | Authentication handshake                                                                    |
-| v1.0.0  | all stable | Full stable ACP spec coverage, production-ready                                             |
-
-Unstable methods land as they stabilize in the spec, likely post-1.0.
