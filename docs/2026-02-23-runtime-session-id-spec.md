@@ -76,20 +76,15 @@ acpx should extract `agentSessionId` from ACP `_meta` on session setup responses
 - `newSession` response `_meta`
 - `loadSession` response `_meta` for reconciliation (when available)
 
-### Metadata key precedence
+### Metadata key
 
-Use first non-empty string from:
+Use exactly one key:
 
 1. `_meta.agentSessionId`
-2. `_meta.runtimeSessionId`
-3. `_meta.providerSessionId`
-4. `_meta.codexSessionId`
-5. `_meta.claudeSessionId`
 
 Notes:
 
-- This keeps adapter compatibility while converging on one canonical output field.
-- Adapter-specific keys remain accepted as input aliases.
+- acpx does not read adapter-specific alias keys for this field.
 
 ## Behavioral Requirements
 
@@ -158,8 +153,8 @@ If `agentSessionId` is absent, UX should avoid implying a distinct inner session
 
 ## Risks
 
-1. Adapter metadata key variance.
-   - Mitigation: precedence + alias support.
+1. Adapter metadata key mismatch.
+   - Mitigation: require adapters to emit `_meta.agentSessionId`.
 
 2. Downstream consumers pinned to old JSON field names.
    - Mitigation: short compatibility window with documented migration.

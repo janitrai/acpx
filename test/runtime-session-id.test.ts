@@ -6,61 +6,32 @@ import {
 } from "../src/runtime-session-id.js";
 
 test("runtime session id precedence is stable", () => {
-  assert.deepEqual(RUNTIME_SESSION_ID_META_KEYS, [
-    "runtimeSessionId",
-    "providerSessionId",
-    "codexSessionId",
-    "claudeSessionId",
-  ]);
+  assert.deepEqual(RUNTIME_SESSION_ID_META_KEYS, ["agentSessionId"]);
 });
 
-test("extractRuntimeSessionId uses first non-empty supported key", () => {
+test("extractRuntimeSessionId reads agentSessionId when present", () => {
   const meta = {
-    runtimeSessionId: "runtime-1",
-    providerSessionId: "provider-1",
-    codexSessionId: "codex-1",
-    claudeSessionId: "claude-1",
+    agentSessionId: "agent-1",
   };
 
-  assert.equal(extractRuntimeSessionId(meta), "runtime-1");
+  assert.equal(extractRuntimeSessionId(meta), "agent-1");
 });
 
-test("extractRuntimeSessionId falls back across provider/codex/claude keys", () => {
+test("extractRuntimeSessionId ignores legacy alias keys", () => {
   assert.equal(
     extractRuntimeSessionId({
-      runtimeSessionId: "   ",
       providerSessionId: "provider-2",
       codexSessionId: "codex-2",
       claudeSessionId: "claude-2",
     }),
-    "provider-2",
-  );
-
-  assert.equal(
-    extractRuntimeSessionId({
-      runtimeSessionId: "",
-      providerSessionId: "",
-      codexSessionId: "codex-3",
-      claudeSessionId: "claude-3",
-    }),
-    "codex-3",
-  );
-
-  assert.equal(
-    extractRuntimeSessionId({
-      runtimeSessionId: "",
-      providerSessionId: "",
-      codexSessionId: "",
-      claudeSessionId: "claude-4",
-    }),
-    "claude-4",
+    undefined,
   );
 });
 
 test("extractRuntimeSessionId ignores non-string and empty values", () => {
   assert.equal(
     extractRuntimeSessionId({
-      runtimeSessionId: 123,
+      agentSessionId: 123,
       providerSessionId: null,
       codexSessionId: ["codex"],
       claudeSessionId: "",

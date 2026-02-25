@@ -1,9 +1,4 @@
-const RUNTIME_SESSION_ID_META_KEYS = [
-  "runtimeSessionId",
-  "providerSessionId",
-  "codexSessionId",
-  "claudeSessionId",
-] as const;
+const RUNTIME_SESSION_ID_META_KEYS = ["agentSessionId"] as const;
 
 export function normalizeRuntimeSessionId(value: unknown): string | undefined {
   if (typeof value !== "string") {
