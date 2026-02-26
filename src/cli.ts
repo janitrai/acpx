@@ -768,6 +768,12 @@ async function handleExec(
   command: Command,
   config: ResolvedAcpxConfig,
 ): Promise<void> {
+  if (config.disableExec) {
+    throw new InvalidArgumentError(
+      "exec is disabled by configuration (disableExec: true). Use prompt with a persistent session instead.",
+    );
+  }
+
   const globalFlags = resolveGlobalFlags(command, config);
   const outputPolicy = resolveOutputPolicy(
     globalFlags.format,

@@ -23,6 +23,7 @@ type ConfigFileShape = {
   format?: unknown;
   agents?: unknown;
   auth?: unknown;
+  disableExec?: unknown;
 };
 
 export type ResolvedAcpxConfig = {
@@ -35,6 +36,7 @@ export type ResolvedAcpxConfig = {
   format: OutputFormat;
   agents: Record<string, string>;
   auth: Record<string, string>;
+  disableExec: boolean;
   globalPath: string;
   projectPath: string;
   hasGlobalConfig: boolean;
@@ -162,6 +164,16 @@ function parseOutputFormat(
     );
   }
   return value as OutputFormat;
+}
+
+function parseDisableExec(value: unknown, sourcePath: string): boolean | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`Invalid config disableExec in ${sourcePath}: expected boolean`);
+  }
+  return value;
 }
 
 function parseDefaultAgent(value: unknown, sourcePath: string): string | undefined {
@@ -347,6 +359,11 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
     parseAuth(projectConfig?.auth, projectPath),
   );
 
+  const disableExec =
+    parseDisableExec(projectConfig?.disableExec, projectPath) ??
+    parseDisableExec(globalConfig?.disableExec, globalPath) ??
+    false;
+
   return {
     defaultAgent,
     defaultPermissions,
@@ -357,6 +374,7 @@ export async function loadResolvedConfig(cwd: string): Promise<ResolvedAcpxConfi
     format,
     agents,
     auth,
+    disableExec,
     globalPath,
     projectPath,
     hasGlobalConfig: globalResult.exists,
@@ -372,6 +390,7 @@ export function toConfigDisplay(config: ResolvedAcpxConfig): {
   ttl: number;
   timeout: number | null;
   format: OutputFormat;
+  disableExec: boolean;
   agents: Record<string, ConfigAgentEntry>;
   authMethods: string[];
 } {
@@ -388,6 +407,7 @@ export function toConfigDisplay(config: ResolvedAcpxConfig): {
     ttl: Math.round(config.ttlMs / 1_000),
     timeout: config.timeoutMs == null ? null : config.timeoutMs / 1_000,
     format: config.format,
+    disableExec: config.disableExec,
     agents,
     authMethods: Object.keys(config.auth).sort(),
   };

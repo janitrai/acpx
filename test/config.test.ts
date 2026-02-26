@@ -104,6 +104,81 @@ test("initGlobalConfigFile creates the config once and then reports existing fil
   });
 });
 
+test("disableExec defaults to false when not set", async () => {
+  await withTempEnv(async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-exec-"));
+    try {
+      const config = await loadResolvedConfig(cwd);
+      assert.equal(config.disableExec, false);
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+test("disableExec is read from global config", async () => {
+  await withTempEnv(async ({ homeDir }) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify({ disableExec: true }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const config = await loadResolvedConfig(cwd);
+    assert.equal(config.disableExec, true);
+  });
+});
+
+test("disableExec project config overrides global config", async () => {
+  await withTempEnv(async ({ homeDir }) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify({ disableExec: true }, null, 2)}\n`,
+      "utf8",
+    );
+
+    await fs.writeFile(
+      path.join(cwd, ".acpxrc.json"),
+      `${JSON.stringify({ disableExec: false }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const config = await loadResolvedConfig(cwd);
+    assert.equal(config.disableExec, false);
+  });
+});
+
+test("disableExec rejects non-boolean values", async () => {
+  await withTempEnv(async ({ homeDir }) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify({ disableExec: "yes" }, null, 2)}\n`,
+      "utf8",
+    );
+
+    await assert.rejects(
+      () => loadResolvedConfig(cwd),
+      (error: Error) => {
+        assert.match(error.message, /disableExec/);
+        assert.match(error.message, /boolean/);
+        return true;
+      },
+    );
+  });
+});
+
 async function withTempEnv(
   run: (ctx: { homeDir: string }) => Promise<void>,
 ): Promise<void> {
