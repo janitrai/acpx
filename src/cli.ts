@@ -1154,7 +1154,9 @@ function printSessionHistoryByFormat(
   format: OutputFormat,
 ): void {
   const history = record.turnHistory ?? [];
-  const visible = history.slice(Math.max(0, history.length - limit));
+  // limit === 0 means show all entries
+  const visible =
+    limit === 0 ? history : history.slice(Math.max(0, history.length - limit));
 
   if (format === "json") {
     process.stdout.write(
@@ -1481,6 +1483,29 @@ function registerSessionsCommand(
       flags: SessionsHistoryFlags,
     ) {
       await handleSessionsHistory(explicitAgentName, name, flags, this, config);
+    });
+
+  sessionsCommand
+    .command("read")
+    .description("Read full session content (all history entries)")
+    .argument("[name]", "Session name", parseSessionName)
+    .option(
+      "--tail <count>",
+      "Show only the last N entries instead of all",
+      parseHistoryLimit,
+    )
+    .action(async function (
+      this: Command,
+      name: string | undefined,
+      flags: { tail?: number },
+    ) {
+      await handleSessionsHistory(
+        explicitAgentName,
+        name,
+        { limit: flags.tail ?? 0 },
+        this,
+        config,
+      );
     });
 }
 
