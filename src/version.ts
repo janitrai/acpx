@@ -45,8 +45,10 @@ export function resolveAcpxVersion(params?: {
   env?: NodeJS.ProcessEnv;
   packageJsonPath?: string;
 }): string {
-  const envVersion = parseVersion((params?.env ?? process.env).npm_package_version);
-  if (envVersion) {
+  const env = params?.env ?? process.env;
+  const envPackageName = parseVersion(env.npm_package_name);
+  const envVersion = parseVersion(env.npm_package_version);
+  if (envPackageName === "acpx" && envVersion) {
     return envVersion;
   }
 
