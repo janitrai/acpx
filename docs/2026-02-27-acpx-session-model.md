@@ -1,4 +1,4 @@
-# ACPX Session Data Model for Long Term Stability
+# ACPX Session Model
 
 Date: 2026-02-27
 Status: Proposed
@@ -111,7 +111,7 @@ or
 }
 ```
 
-This is the Lindy guarantee: future ACP fields/methods are retained even if acpx does not understand them yet.
+This guarantees future ACP fields/methods are retained even if acpx does not understand them yet.
 
 ### 2) Session lifecycle
 
