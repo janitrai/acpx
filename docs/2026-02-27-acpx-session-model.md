@@ -9,15 +9,16 @@ Define a long-term stable persistence model with:
 
 - one canonical event schema,
 - one authoritative event timeline,
-- one checkpoint/session schema that includes a Zed-analog thread projection.
+- one checkpoint/session schema where conversation and ACPX runtime state are both top-level.
 
 ## Core Decisions
 
 1. Persist exactly one canonical event schema: `acpx.event.v1`.
 2. Use append-only NDJSON event files as source of truth.
 3. Use `session.json` as a derived checkpoint/index.
-4. Keep `session.json.thread` as a Zed-analog projection for compatibility and ergonomics.
-5. Use `snake_case` for all persisted acpx-owned keys.
+4. Keep conversation fields at the root of `session.json` (no nested conversation object).
+5. Keep ACPX runtime fields at the root of `session.json` (no separate runtime file).
+6. Use `snake_case` for all persisted acpx-owned keys.
 
 ## Canonical ID Semantics
 
@@ -295,22 +296,31 @@ Command behavior:
 
 `session.json` is derived from event replay.
 
+Conversation fields and runtime fields are stored at the same top level.
+
 ```json
 {
   "schema": "acpx.session.v1",
+  "version": "1.0.0",
+
   "session_id": "019c....",
   "acp_session_id": "019c....",
   "agent_session_id": "019c....",
-  "agent_command": "npx @zed-industries/codex-acp",
+
+  "agent_command": "npx codex-acp",
   "cwd": "/repo",
   "name": "my-session",
+
   "created_at": "2026-02-27T12:00:00.000Z",
   "updated_at": "2026-02-27T12:10:00.000Z",
+  "last_used_at": "2026-02-27T12:10:00.000Z",
+
   "last_seq": 412,
   "last_request_id": "req_123",
   "closed": false,
   "closed_at": null,
   "pid": 1234,
+
   "event_log": {
     "active_path": "/home/user/.acpx/sessions/019c....events.ndjson",
     "segment_count": 3,
@@ -319,31 +329,27 @@ Command behavior:
     "last_write_at": "2026-02-27T12:10:00.000Z",
     "last_write_error": null
   },
-  "thread": {
-    "version": "0.3.0",
-    "title": null,
-    "messages": [],
-    "updated_at": "2026-02-27T12:10:00.000Z",
-    "detailed_summary": null,
-    "initial_project_snapshot": null,
-    "cumulative_token_usage": {},
-    "request_token_usage": {},
-    "model": null,
-    "profile": null,
-    "imported": false,
-    "subagent_context": null,
-    "speed": null,
-    "thinking_enabled": false,
-    "thinking_effort": null
-  }
+
+  "title": null,
+  "messages": [],
+  "cumulative_token_usage": {},
+  "request_token_usage": {}
 }
 ```
 
 Rules:
 
-- `thread` shape is a Zed-analog projection.
-- `thread` is derived from events; it is not the event source of truth.
+- Conversation fields must remain top-level.
+- Runtime fields must remain top-level.
 - `session.json` must be reconstructible by replaying `events*.ndjson`.
+
+### Message Encoding
+
+`messages` uses externally tagged variants:
+
+- user message: `{ "User": { ... } }`
+- agent message: `{ "Agent": { ... } }`
+- resume marker: `"Resume"`
 
 ## Sequence and Single-Writer Rules
 
@@ -379,7 +385,7 @@ On startup or repair:
 1. Read all segments oldest -> newest.
 2. Validate `schema` and event payloads.
 3. Enforce monotonic `seq`.
-4. Rebuild checkpoint and thread projection.
+4. Rebuild checkpoint state.
 5. Rewrite `session.json` atomically.
 
 Corrupt line policy:

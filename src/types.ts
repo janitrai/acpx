@@ -437,20 +437,8 @@ export type SessionThread = {
   title?: string | null;
   messages: SessionThreadMessage[];
   updated_at: string;
-  detailed_summary?: string | null;
-  initial_project_snapshot?: unknown | null;
   cumulative_token_usage: SessionThreadTokenUsage;
   request_token_usage: Record<string, SessionThreadTokenUsage>;
-  model?: unknown | null;
-  profile?: unknown | null;
-  imported: boolean;
-  subagent_context?: {
-    parent_session_id: string;
-    depth: number;
-  } | null;
-  speed?: "standard" | "fast" | null;
-  thinking_enabled: boolean;
-  thinking_effort?: string | null;
 };
 
 export type SessionAcpxState = {

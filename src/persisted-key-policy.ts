@@ -19,9 +19,6 @@ const MAP_OBJECT_PATHS = new Set([
 
 const OPAQUE_VALUE_PATHS = new Set([
   "agent_capabilities",
-  "thread.initial_project_snapshot",
-  "thread.model",
-  "thread.profile",
   "thread.messages.Agent.content.ToolUse.input",
   "acpx.config_options",
 ]);

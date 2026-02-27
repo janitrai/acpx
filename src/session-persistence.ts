@@ -284,9 +284,7 @@ function parseThread(raw: unknown): SessionThread | undefined {
     record.version !== "0.3.0" ||
     !Array.isArray(record.messages) ||
     !record.messages.every(isThreadMessage) ||
-    typeof record.updated_at !== "string" ||
-    typeof record.imported !== "boolean" ||
-    typeof record.thinking_enabled !== "boolean"
+    typeof record.updated_at !== "string"
   ) {
     return undefined;
   }
@@ -297,45 +295,6 @@ function parseThread(raw: unknown): SessionThread | undefined {
     typeof record.title !== "string"
   ) {
     return undefined;
-  }
-
-  if (
-    record.detailed_summary !== undefined &&
-    record.detailed_summary !== null &&
-    typeof record.detailed_summary !== "string"
-  ) {
-    return undefined;
-  }
-
-  if (
-    record.thinking_effort !== undefined &&
-    record.thinking_effort !== null &&
-    typeof record.thinking_effort !== "string"
-  ) {
-    return undefined;
-  }
-
-  const speed = record.speed;
-  if (
-    speed !== undefined &&
-    speed !== null &&
-    speed !== "standard" &&
-    speed !== "fast"
-  ) {
-    return undefined;
-  }
-
-  if (record.subagent_context !== undefined && record.subagent_context !== null) {
-    const subagentContext = asRecord(record.subagent_context);
-    if (
-      !subagentContext ||
-      typeof subagentContext.parent_session_id !== "string" ||
-      typeof subagentContext.depth !== "number" ||
-      !Number.isInteger(subagentContext.depth) ||
-      subagentContext.depth < 0
-    ) {
-      return undefined;
-    }
   }
 
   const cumulativeTokenUsage = parseTokenUsage(record.cumulative_token_usage);
@@ -354,33 +313,8 @@ function parseThread(raw: unknown): SessionThread | undefined {
         : null,
     messages: record.messages as SessionThread["messages"],
     updated_at: record.updated_at,
-    detailed_summary:
-      record.detailed_summary === undefined ||
-      record.detailed_summary === null ||
-      typeof record.detailed_summary === "string"
-        ? (record.detailed_summary as string | null | undefined)
-        : null,
-    initial_project_snapshot:
-      record.initial_project_snapshot === undefined
-        ? null
-        : record.initial_project_snapshot,
     cumulative_token_usage: cumulativeTokenUsage ?? {},
     request_token_usage: requestTokenUsage ?? {},
-    model: record.model === undefined ? null : record.model,
-    profile: record.profile === undefined ? null : record.profile,
-    imported: record.imported,
-    subagent_context:
-      record.subagent_context === undefined
-        ? null
-        : (record.subagent_context as SessionThread["subagent_context"]),
-    speed: speed as SessionThread["speed"],
-    thinking_enabled: record.thinking_enabled,
-    thinking_effort:
-      record.thinking_effort === undefined ||
-      record.thinking_effort === null ||
-      typeof record.thinking_effort === "string"
-        ? (record.thinking_effort as string | null | undefined)
-        : null,
   };
 }
 

@@ -72,21 +72,12 @@ function makeRecord(): SessionRecord {
         },
       ],
       updated_at: "2026-02-27T00:00:00.000Z",
-      detailed_summary: null,
-      initial_project_snapshot: null,
       cumulative_token_usage: {},
       request_token_usage: {
         "5cf39f6d-9c4f-4d20-9e4b-739abc4b2554": {
           input_tokens: 1,
         },
       },
-      model: null,
-      profile: null,
-      imported: false,
-      subagent_context: null,
-      speed: null,
-      thinking_enabled: false,
-      thinking_effort: null,
     },
     acpx: {
       current_mode_id: "code",

@@ -426,17 +426,8 @@ export function createSessionThread(timestamp = isoNow()): SessionThread {
     title: null,
     messages: [],
     updated_at: timestamp,
-    detailed_summary: null,
-    initial_project_snapshot: null,
     cumulative_token_usage: {},
     request_token_usage: {},
-    model: null,
-    profile: null,
-    imported: false,
-    subagent_context: null,
-    speed: null,
-    thinking_enabled: false,
-    thinking_effort: null,
   };
 }
 
@@ -450,17 +441,8 @@ export function cloneSessionThread(thread: SessionThread | undefined): SessionTh
     title: thread.title,
     messages: deepClone(thread.messages ?? []),
     updated_at: thread.updated_at,
-    detailed_summary: thread.detailed_summary,
-    initial_project_snapshot: deepClone(thread.initial_project_snapshot),
     cumulative_token_usage: deepClone(thread.cumulative_token_usage ?? {}),
     request_token_usage: deepClone(thread.request_token_usage ?? {}),
-    model: deepClone(thread.model),
-    profile: deepClone(thread.profile),
-    imported: thread.imported === true,
-    subagent_context: deepClone(thread.subagent_context),
-    speed: thread.speed,
-    thinking_enabled: thread.thinking_enabled === true,
-    thinking_effort: thread.thinking_effort,
   };
 }
 
