@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { AcpClient } from "./client.js";
 import { formatErrorMessage, normalizeOutputError } from "./error-normalization.js";
-import { isAcpResourceNotFoundError } from "./acp-error-shapes.js";
+import { isAcpInternalError, isAcpResourceNotFoundError } from "./acp-error-shapes.js";
 import type { QueueOwnerActiveSessionController } from "./queue-owner-turn-controller.js";
 import {
   type QueueOwnerMessage,
@@ -345,7 +345,17 @@ function shouldFallbackToNewSession(error: unknown): boolean {
   if (error instanceof TimeoutError || error instanceof InterruptedError) {
     return false;
   }
-  return isAcpResourceNotFoundError(error);
+  // Resource not found — agent explicitly says session doesn't exist.
+  if (isAcpResourceNotFoundError(error)) {
+    return true;
+  }
+  // Internal error (-32603) — some agents (e.g. claude-agent-acp) return this
+  // when they cannot restore a session after process restart. Treat as
+  // recoverable and fall back to creating a fresh session.
+  if (isAcpInternalError(error)) {
+    return true;
+  }
+  return false;
 }
 
 async function runQueuedTask(

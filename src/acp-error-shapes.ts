@@ -126,6 +126,16 @@ export function extractAcpError(error: unknown): OutputErrorAcpPayload | undefin
   return extractAcpErrorInternal(error, 0);
 }
 
+/**
+ * JSON-RPC Internal error (-32603) from session/load.
+ * Some agents (e.g. claude-agent-acp) cannot restore sessions after a process
+ * restart and return this code instead of a "resource not found" style error.
+ */
+export function isAcpInternalError(error: unknown): boolean {
+  const acp = extractAcpError(error);
+  return acp?.code === -32603;
+}
+
 export function isAcpResourceNotFoundError(error: unknown): boolean {
   const acp = extractAcpError(error);
   if (acp && RESOURCE_NOT_FOUND_ACP_CODES.has(acp.code)) {
