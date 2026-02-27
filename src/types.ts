@@ -46,6 +46,7 @@ export const ACPX_EVENT_TYPES = {
   CLIENT_OPERATION: "client_operation",
   TURN_DONE: "turn_done",
   ERROR: "error",
+  PROMPT_QUEUED: "prompt_queued",
   SESSION_ENSURED: "session_ensured",
   CANCEL_REQUESTED: "cancel_requested",
   CANCEL_RESULT: "cancel_result",
@@ -64,6 +65,14 @@ export const ACPX_EVENT_STATUS_SNAPSHOT_STATUSES = [
 ] as const;
 export type AcpxEventStatusSnapshotStatus =
   (typeof ACPX_EVENT_STATUS_SNAPSHOT_STATUSES)[number];
+
+export const ACPX_EVENT_TOOL_CALL_STATUSES = [
+  "pending",
+  "in_progress",
+  "completed",
+  "failed",
+] as const;
+export type AcpxEventToolCallStatus = (typeof ACPX_EVENT_TOOL_CALL_STATUSES)[number];
 
 export const OUTPUT_ERROR_CODES = [
   "NO_SESSION",
@@ -157,9 +166,9 @@ export type AcpxEvent =
   | (AcpxEventEnvelope & {
       type: typeof ACPX_EVENT_TYPES.TOOL_CALL;
       data: {
-        tool_call_id?: string;
+        tool_call_id: string;
         title?: string;
-        status?: string;
+        status?: AcpxEventToolCallStatus;
       };
     })
   | (AcpxEventEnvelope & {
@@ -206,10 +215,17 @@ export type AcpxEvent =
       };
     })
   | (AcpxEventEnvelope & {
+      type: typeof ACPX_EVENT_TYPES.PROMPT_QUEUED;
+      data: {
+        request_id: string;
+      };
+    })
+  | (AcpxEventEnvelope & {
       type: typeof ACPX_EVENT_TYPES.SESSION_ENSURED;
       data: {
         created: boolean;
         name?: string;
+        replaced_session_id?: string;
       };
     })
   | (AcpxEventEnvelope & {
@@ -226,6 +242,7 @@ export type AcpxEvent =
       type: typeof ACPX_EVENT_TYPES.MODE_SET;
       data: {
         mode_id: string;
+        resumed?: boolean;
       };
     })
   | (AcpxEventEnvelope & {
@@ -233,6 +250,8 @@ export type AcpxEvent =
       data: {
         config_id: string;
         value: string;
+        resumed?: boolean;
+        config_options?: unknown[];
       };
     })
   | (AcpxEventEnvelope & {
@@ -241,6 +260,10 @@ export type AcpxEvent =
         status: AcpxEventStatusSnapshotStatus;
         pid?: number;
         summary?: string;
+        uptime?: string;
+        last_prompt_time?: string;
+        exit_code?: number;
+        signal?: string;
       };
     })
   | (AcpxEventEnvelope & {

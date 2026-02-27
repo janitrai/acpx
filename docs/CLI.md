@@ -392,44 +392,54 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 ### Prompt/exec output behavior
 
 - `text`: assistant text, tool status blocks, client-operation logs, plan updates, and `[done] <reason>`
-- `json`: one JSON object per line with event types like `text`, `thought`, `tool_call`, `client_operation`, `plan`, `update`, `done`, `error`
+- `json`: one canonical `acpx.event.v1` object per line
 - `quiet`: concatenated assistant text only
 
-JSON events include a stable envelope for correlation:
+Canonical event envelope:
 
 ```json
 {
-  "eventVersion": 1,
-  "sessionId": "abc123",
-  "requestId": "req-42",
-  "seq": 7,
-  "stream": "prompt",
-  "type": "tool_call"
+  "schema": "acpx.event.v1",
+  "event_id": "...",
+  "session_id": "...",
+  "acp_session_id": "...",
+  "agent_session_id": "...",
+  "request_id": "...",
+  "seq": 12,
+  "ts": "2026-02-27T00:00:00.000Z",
+  "type": "output_delta",
+  "data": {
+    "stream": "output",
+    "text": "..."
+  }
 }
 ```
 
-JSON error events include stable top-level `code`, optional `detailCode`, and optional `acp` payload.
+JSON error events are also emitted as canonical `acpx.event.v1` payloads with `type: "error"`.
 
-### Sessions command output behavior
+### Control-command JSON mapping
+
+When `--format json` is used, control commands emit canonical `acpx.event.v1` events:
+
+- `prompt --no-wait`: `type: "prompt_queued"`
+- `sessions new`: `type: "session_ensured"` with `data.created: true`
+- `sessions ensure`: `type: "session_ensured"` with `data.created: true|false`
+- `sessions close`: `type: "session_closed"`
+- `cancel`: `type: "cancel_result"`
+- `set-mode`: `type: "mode_set"`
+- `set`: `type: "config_set"`
+- `status`: `type: "status_snapshot"`
+
+### Sessions/query command output behavior
 
 - `sessions list` with `text`: tab-separated `id`, `name`, `cwd`, `lastUsedAt` (closed sessions include a `[closed]` marker next to id)
 - `sessions list` with `json`: a single JSON array of session records
 - `sessions list` with `quiet`: one session id per line (closed sessions include `[closed]`)
-- `sessions new` with `text`: new session id (and replaced id when applicable)
-- `sessions new` with `json`: `{"type":"session_created",...}`
-- `sessions new` with `quiet`: new session id
-- `sessions ensure` with `text`: ensured session id (created or reused)
-- `sessions ensure` with `json`: `{"type":"session_ensured","created":true|false,...}`
-- `sessions ensure` with `quiet`: ensured session id
-- `sessions close` with `text`: closed record id
-- `sessions close` with `json`: `{"type":"session_closed",...}`
-- `sessions close` with `quiet`: no output
 - `sessions show` with `text`: key/value metadata dump
 - `sessions show` with `json`: full session record object
 - `sessions history` with `text`: tab-separated `timestamp role textPreview` entries
 - `sessions history` with `json`: object containing `entries` array
 - `status` with `text`: key/value process status lines
-- `status` with `json`: structured status object with `running|dead|no-session`
 
 ## Permission modes
 

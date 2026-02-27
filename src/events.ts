@@ -4,6 +4,7 @@ import {
   ACPX_EVENT_OUTPUT_STREAMS,
   ACPX_EVENT_SCHEMA,
   ACPX_EVENT_STATUS_SNAPSHOT_STATUSES,
+  ACPX_EVENT_TOOL_CALL_STATUSES,
   ACPX_EVENT_TURN_MODES,
   ACPX_EVENT_TYPES,
   OUTPUT_ERROR_CODES,
@@ -213,6 +214,24 @@ function isAcpError(value: unknown): value is OutputErrorAcpPayload {
   );
 }
 
+function isToolCallStatus(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    ACPX_EVENT_TOOL_CALL_STATUSES.includes(
+      value as (typeof ACPX_EVENT_TOOL_CALL_STATUSES)[number],
+    )
+  );
+}
+
+function isFiniteInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+function hasOnlyKeys(data: Record<string, unknown>, allowed: string[]): boolean {
+  const allowedSet = new Set<string>(allowed);
+  return Object.keys(data).every((key) => allowedSet.has(key));
+}
+
 export function isAcpxEvent(value: unknown): value is AcpxEvent {
   const event = asRecord(value);
   if (!event) {
@@ -255,30 +274,81 @@ export function isAcpxEvent(value: unknown): value is AcpxEvent {
   switch (event.type) {
     case ACPX_EVENT_TYPES.TURN_STARTED:
       return (
+        hasOnlyKeys(data, ["mode", "resumed", "input_preview"]) &&
         typeof data.mode === "string" &&
         ACPX_EVENT_TURN_MODES.includes(
           data.mode as (typeof ACPX_EVENT_TURN_MODES)[number],
         ) &&
-        typeof data.resumed === "boolean"
+        typeof data.resumed === "boolean" &&
+        (data.input_preview === undefined || typeof data.input_preview === "string")
       );
     case ACPX_EVENT_TYPES.OUTPUT_DELTA:
-      return isAcpxEventOutputStream(data.stream) && typeof data.text === "string";
+      return (
+        hasOnlyKeys(data, ["stream", "text"]) &&
+        isAcpxEventOutputStream(data.stream) &&
+        typeof data.text === "string"
+      );
     case ACPX_EVENT_TYPES.TOOL_CALL:
-      return true;
+      return (
+        hasOnlyKeys(data, ["tool_call_id", "title", "status"]) &&
+        typeof data.tool_call_id === "string" &&
+        data.tool_call_id.trim().length > 0 &&
+        (data.title === undefined ||
+          (typeof data.title === "string" && data.title.trim().length > 0)) &&
+        (data.status === undefined || isToolCallStatus(data.status))
+      );
     case ACPX_EVENT_TYPES.PLAN:
-      return Array.isArray(data.entries);
+      return (
+        hasOnlyKeys(data, ["entries"]) &&
+        Array.isArray(data.entries) &&
+        data.entries.every((entry) => {
+          const parsed = asRecord(entry);
+          return (
+            !!parsed &&
+            hasOnlyKeys(parsed, ["content", "status", "priority"]) &&
+            typeof parsed.content === "string" &&
+            typeof parsed.status === "string" &&
+            typeof parsed.priority === "string"
+          );
+        })
+      );
     case ACPX_EVENT_TYPES.UPDATE:
-      return typeof data.update === "string";
+      return hasOnlyKeys(data, ["update"]) && typeof data.update === "string";
     case ACPX_EVENT_TYPES.CLIENT_OPERATION:
       return (
+        hasOnlyKeys(data, ["method", "status", "summary", "details"]) &&
         typeof data.method === "string" &&
         typeof data.status === "string" &&
-        typeof data.summary === "string"
+        typeof data.summary === "string" &&
+        (data.details === undefined || typeof data.details === "string")
       );
     case ACPX_EVENT_TYPES.TURN_DONE:
-      return typeof data.stop_reason === "string";
+      return (
+        hasOnlyKeys(data, ["stop_reason", "permission_stats"]) &&
+        typeof data.stop_reason === "string" &&
+        (data.permission_stats === undefined ||
+          (() => {
+            const stats = asRecord(data.permission_stats);
+            return (
+              !!stats &&
+              hasOnlyKeys(stats, ["requested", "approved", "denied", "cancelled"]) &&
+              isFiniteInteger(stats.requested) &&
+              isFiniteInteger(stats.approved) &&
+              isFiniteInteger(stats.denied) &&
+              isFiniteInteger(stats.cancelled)
+            );
+          })())
+      );
     case ACPX_EVENT_TYPES.ERROR:
       return (
+        hasOnlyKeys(data, [
+          "code",
+          "detail_code",
+          "origin",
+          "message",
+          "retryable",
+          "acp_error",
+        ]) &&
         isOutputErrorCode(data.code) &&
         (data.detail_code === undefined || typeof data.detail_code === "string") &&
         (data.origin === undefined || isOutputErrorOrigin(data.origin)) &&
@@ -286,25 +356,65 @@ export function isAcpxEvent(value: unknown): value is AcpxEvent {
         (data.retryable === undefined || typeof data.retryable === "boolean") &&
         (data.acp_error === undefined || isAcpError(data.acp_error))
       );
+    case ACPX_EVENT_TYPES.PROMPT_QUEUED:
+      return (
+        hasOnlyKeys(data, ["request_id"]) &&
+        typeof data.request_id === "string" &&
+        data.request_id.trim().length > 0
+      );
     case ACPX_EVENT_TYPES.SESSION_ENSURED:
-      return typeof data.created === "boolean";
+      return (
+        hasOnlyKeys(data, ["created", "name", "replaced_session_id"]) &&
+        typeof data.created === "boolean" &&
+        (data.name === undefined || typeof data.name === "string") &&
+        (data.replaced_session_id === undefined ||
+          typeof data.replaced_session_id === "string")
+      );
     case ACPX_EVENT_TYPES.CANCEL_REQUESTED:
-      return true;
+      return hasOnlyKeys(data, []);
     case ACPX_EVENT_TYPES.CANCEL_RESULT:
-      return typeof data.cancelled === "boolean";
+      return hasOnlyKeys(data, ["cancelled"]) && typeof data.cancelled === "boolean";
     case ACPX_EVENT_TYPES.MODE_SET:
-      return typeof data.mode_id === "string";
+      return (
+        hasOnlyKeys(data, ["mode_id", "resumed"]) &&
+        typeof data.mode_id === "string" &&
+        data.mode_id.trim().length > 0 &&
+        (data.resumed === undefined || typeof data.resumed === "boolean")
+      );
     case ACPX_EVENT_TYPES.CONFIG_SET:
-      return typeof data.config_id === "string" && typeof data.value === "string";
+      return (
+        hasOnlyKeys(data, ["config_id", "value", "resumed", "config_options"]) &&
+        typeof data.config_id === "string" &&
+        data.config_id.trim().length > 0 &&
+        typeof data.value === "string" &&
+        (data.resumed === undefined || typeof data.resumed === "boolean") &&
+        (data.config_options === undefined || Array.isArray(data.config_options))
+      );
     case ACPX_EVENT_TYPES.STATUS_SNAPSHOT:
       return (
+        hasOnlyKeys(data, [
+          "status",
+          "pid",
+          "summary",
+          "uptime",
+          "last_prompt_time",
+          "exit_code",
+          "signal",
+        ]) &&
         typeof data.status === "string" &&
         ACPX_EVENT_STATUS_SNAPSHOT_STATUSES.includes(
           data.status as (typeof ACPX_EVENT_STATUS_SNAPSHOT_STATUSES)[number],
-        )
+        ) &&
+        (data.pid === undefined || (isFiniteInteger(data.pid) && data.pid > 0)) &&
+        (data.summary === undefined || typeof data.summary === "string") &&
+        (data.uptime === undefined || typeof data.uptime === "string") &&
+        (data.last_prompt_time === undefined ||
+          typeof data.last_prompt_time === "string") &&
+        (data.exit_code === undefined || isFiniteInteger(data.exit_code)) &&
+        (data.signal === undefined || typeof data.signal === "string")
       );
     case ACPX_EVENT_TYPES.SESSION_CLOSED:
-      return data.reason === "close";
+      return hasOnlyKeys(data, ["reason"]) && data.reason === "close";
     default:
       return false;
   }

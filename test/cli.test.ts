@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +10,15 @@ import { InvalidArgumentError } from "commander";
 import { formatPromptSessionBannerLine, parseTtlSeconds } from "../src/cli.js";
 import { serializeSessionRecordForDisk } from "../src/session-persistence.js";
 import type { AcpxEvent, SessionRecord } from "../src/types.js";
+import {
+  cleanupOwnerArtifacts,
+  closeServer,
+  listenServer,
+  queuePaths,
+  startKeeperProcess,
+  stopProcess,
+  writeQueueOwnerLock,
+} from "./queue-test-helpers.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
@@ -144,27 +154,19 @@ test("sessions ensure creates when missing and returns existing on subsequent ca
       homeDir,
     );
     assert.equal(first.code, 0, first.stderr);
-    const firstPayload = JSON.parse(first.stdout.trim()) as {
-      type: string;
-      acpxRecordId: string;
-      created: boolean;
-    };
+    const firstPayload = JSON.parse(first.stdout.trim()) as AcpxEvent;
     assert.equal(firstPayload.type, "session_ensured");
-    assert.equal(firstPayload.created, true);
+    assert.equal((firstPayload.data as { created?: boolean }).created, true);
 
     const second = await runCli(
       ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
       homeDir,
     );
     assert.equal(second.code, 0, second.stderr);
-    const secondPayload = JSON.parse(second.stdout.trim()) as {
-      type: string;
-      acpxRecordId: string;
-      created: boolean;
-    };
+    const secondPayload = JSON.parse(second.stdout.trim()) as AcpxEvent;
     assert.equal(secondPayload.type, "session_ensured");
-    assert.equal(secondPayload.created, false);
-    assert.equal(secondPayload.acpxRecordId, firstPayload.acpxRecordId);
+    assert.equal((secondPayload.data as { created?: boolean }).created, false);
+    assert.equal(secondPayload.session_id, firstPayload.session_id);
   });
 });
 
@@ -190,12 +192,10 @@ test("sessions ensure resolves existing session by directory walk", async () => 
       homeDir,
     );
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as {
-      acpxRecordId: string;
-      created: boolean;
-    };
-    assert.equal(payload.acpxRecordId, "parent-session");
-    assert.equal(payload.created, false);
+    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
+    assert.equal(payload.session_id, "parent-session");
+    assert.equal(payload.type, "session_ensured");
+    assert.equal((payload.data as { created?: boolean }).created, false);
   });
 });
 
@@ -243,36 +243,29 @@ test("sessions and status surface agentSessionId for codex and claude in JSON mo
         homeDir,
       );
       assert.equal(created.code, 0, created.stderr);
-      const createdPayload = JSON.parse(created.stdout.trim()) as {
-        type: string;
-        agentSessionId?: string;
-      };
-      assert.equal(createdPayload.type, "session_created");
-      assert.equal(createdPayload.agentSessionId, scenario.expectedRuntimeSessionId);
+      const createdPayload = JSON.parse(created.stdout.trim()) as AcpxEvent;
+      assert.equal(createdPayload.type, "session_ensured");
+      assert.equal((createdPayload.data as { created?: boolean }).created, true);
+      assert.equal(createdPayload.agent_session_id, scenario.expectedRuntimeSessionId);
 
       const ensured = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "sessions", "ensure"],
         homeDir,
       );
       assert.equal(ensured.code, 0, ensured.stderr);
-      const ensuredPayload = JSON.parse(ensured.stdout.trim()) as {
-        type: string;
-        created: boolean;
-        agentSessionId?: string;
-      };
+      const ensuredPayload = JSON.parse(ensured.stdout.trim()) as AcpxEvent;
       assert.equal(ensuredPayload.type, "session_ensured");
-      assert.equal(ensuredPayload.created, false);
-      assert.equal(ensuredPayload.agentSessionId, scenario.expectedRuntimeSessionId);
+      assert.equal((ensuredPayload.data as { created?: boolean }).created, false);
+      assert.equal(ensuredPayload.agent_session_id, scenario.expectedRuntimeSessionId);
 
       const status = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "status"],
         homeDir,
       );
       assert.equal(status.code, 0, status.stderr);
-      const statusPayload = JSON.parse(status.stdout.trim()) as {
-        agentSessionId?: string;
-      };
-      assert.equal(statusPayload.agentSessionId, scenario.expectedRuntimeSessionId);
+      const statusPayload = JSON.parse(status.stdout.trim()) as AcpxEvent;
+      assert.equal(statusPayload.type, "status_snapshot");
+      assert.equal(statusPayload.agent_session_id, scenario.expectedRuntimeSessionId);
     }
   });
 });
@@ -477,12 +470,12 @@ test("queued prompt failures emit exactly one JSON error event", async () => {
       assert.equal(errors[0]?.data.code, "PERMISSION_PROMPT_UNAVAILABLE");
       assert.notEqual(errors[0]?.session_id, "unknown");
     } finally {
-      if (blocker.exitCode === null) {
+      if (blocker.exitCode === null && blocker.signalCode == null) {
         blocker.kill("SIGKILL");
+        await new Promise<void>((resolve) => {
+          blocker.once("close", () => resolve());
+        });
       }
-      await new Promise<void>((resolve) => {
-        blocker.once("close", () => resolve());
-      });
     }
   });
 });
@@ -550,12 +543,12 @@ test("queued prompt failures remain visible in quiet mode", async () => {
         /Permission prompt unavailable in non-interactive mode/,
       );
     } finally {
-      if (blocker.exitCode === null) {
+      if (blocker.exitCode === null && blocker.signalCode == null) {
         blocker.kill("SIGKILL");
+        await new Promise<void>((resolve) => {
+          blocker.once("close", () => resolve());
+        });
       }
-      await new Promise<void>((resolve) => {
-        blocker.once("close", () => resolve());
-      });
     }
   });
 });
@@ -587,12 +580,10 @@ test("--json-strict suppresses session banners on stderr", async () => {
     );
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stderr.trim(), "");
-    const payload = JSON.parse(result.stdout.trim()) as {
-      type: string;
-      acpxRecordId: string;
-    };
-    assert.equal(payload.type, "session_created");
-    assert.equal(typeof payload.acpxRecordId, "string");
+    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
+    assert.equal(payload.type, "session_ensured");
+    assert.equal((payload.data as { created?: boolean }).created, true);
+    assert.equal(typeof payload.session_id, "string");
   });
 });
 
@@ -692,12 +683,10 @@ test("cancel resolves named session when -s is before subcommand", async () => {
     );
 
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as {
-      sessionId: string;
-      cancelled: boolean;
-    };
-    assert.equal(payload.sessionId, "named-cancel-session");
-    assert.equal(payload.cancelled, false);
+    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
+    assert.equal(payload.type, "cancel_result");
+    assert.equal(payload.session_id, "named-cancel-session");
+    assert.equal((payload.data as { cancelled?: boolean }).cancelled, false);
   });
 });
 
@@ -723,15 +712,12 @@ test("status resolves named session when -s is before subcommand", async () => {
     );
 
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as {
-      sessionId: string | null;
-      status: string;
-      agentSessionId?: string | null;
-    };
-    assert.equal(payload.sessionId, "named-status-session");
-    assert.equal(payload.status, "dead");
-    assert.notEqual(payload.status, "no-session");
-    assert.equal("agentSessionId" in payload, false);
+    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
+    assert.equal(payload.type, "status_snapshot");
+    assert.equal(payload.session_id, "named-status-session");
+    assert.equal((payload.data as { status?: string }).status, "dead");
+    assert.notEqual((payload.data as { status?: string }).status, "no-session");
+    assert.equal(payload.agent_session_id, undefined);
   });
 });
 
@@ -958,36 +944,48 @@ test("sessions history prints stored history entries", async () => {
   });
 });
 
-test("status reports running process when session pid is alive", async () => {
+test("status reports running queue owner when owner socket is reachable", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
 
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
-      stdio: "ignore",
+    const sessionId = "status-live";
+    const keeper = await startKeeperProcess();
+    const { lockPath, socketPath } = queuePaths(homeDir, sessionId);
+
+    const server = net.createServer((socket) => {
+      socket.end();
     });
 
     try {
       await writeSessionRecord(homeDir, {
-        acpxRecordId: "status-live",
-        acpSessionId: "status-live",
+        acpxRecordId: sessionId,
+        acpSessionId: sessionId,
         agentCommand: "npx @zed-industries/codex-acp",
         cwd,
         createdAt: "2026-01-01T00:00:00.000Z",
         lastUsedAt: "2026-01-01T00:00:00.000Z",
         lastPromptAt: "2026-01-01T00:00:00.000Z",
         closed: false,
-        pid: child.pid,
+        pid: keeper.pid,
         agentStartedAt: "2026-01-01T00:00:00.000Z",
       });
+
+      await writeQueueOwnerLock({
+        lockPath,
+        pid: keeper.pid,
+        sessionId,
+        socketPath,
+      });
+      await listenServer(server, socketPath);
 
       const result = await runCli(["--cwd", cwd, "codex", "status"], homeDir);
       assert.equal(result.code, 0, result.stderr);
       assert.match(result.stdout, /status: running/);
     } finally {
-      if (child.pid && child.exitCode == null && child.signalCode == null) {
-        child.kill("SIGKILL");
-      }
+      await closeServer(server);
+      await cleanupOwnerArtifacts({ socketPath, lockPath });
+      stopProcess(keeper);
     }
   });
 });

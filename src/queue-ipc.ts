@@ -142,6 +142,16 @@ type QueueOwnerRecord = {
   socketPath: string;
 };
 
+export type QueueOwnerHealth = {
+  sessionId: string;
+  hasLease: boolean;
+  healthy: boolean;
+  socketReachable: boolean;
+  pidAlive: boolean;
+  pid?: number;
+  socketPath?: string;
+};
+
 export type QueueOwnerLease = {
   lockPath: string;
   socketPath: string;
@@ -331,20 +341,18 @@ async function connectToSocket(socketPath: string): Promise<net.Socket> {
 
 async function connectToQueueOwner(
   owner: QueueOwnerRecord,
+  maxAttempts = QUEUE_CONNECT_ATTEMPTS,
 ): Promise<net.Socket | undefined> {
   let lastError: unknown;
 
-  for (let attempt = 0; attempt < QUEUE_CONNECT_ATTEMPTS; attempt += 1) {
+  const attempts = Math.max(1, Math.trunc(maxAttempts));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       return await connectToSocket(owner.socketPath);
     } catch (error) {
       lastError = error;
       if (!shouldRetryQueueConnect(error)) {
         throw error;
-      }
-
-      if (!isProcessAlive(owner.pid)) {
-        return undefined;
       }
       await waitMs(QUEUE_CONNECT_RETRY_MS);
     }
@@ -355,6 +363,57 @@ async function connectToQueueOwner(
   }
 
   return undefined;
+}
+
+export async function probeQueueOwnerHealth(
+  sessionId: string,
+): Promise<QueueOwnerHealth> {
+  const owner = await readQueueOwnerRecord(sessionId);
+  if (!owner) {
+    return {
+      sessionId,
+      hasLease: false,
+      healthy: false,
+      socketReachable: false,
+      pidAlive: false,
+    };
+  }
+
+  const pidAlive = isProcessAlive(owner.pid);
+  let socketReachable = false;
+
+  try {
+    const socket = await connectToQueueOwner(owner, 2);
+    if (socket) {
+      socketReachable = true;
+      if (!socket.destroyed) {
+        socket.end();
+      }
+    }
+  } catch {
+    socketReachable = false;
+  }
+
+  if (!socketReachable && !pidAlive) {
+    await cleanupStaleQueueOwner(sessionId, owner);
+    return {
+      sessionId,
+      hasLease: false,
+      healthy: false,
+      socketReachable: false,
+      pidAlive: false,
+    };
+  }
+
+  return {
+    sessionId,
+    hasLease: true,
+    healthy: socketReachable,
+    socketReachable,
+    pidAlive,
+    pid: owner.pid,
+    socketPath: owner.socketPath,
+  };
 }
 
 function writeQueueMessage(socket: net.Socket, message: QueueOwnerMessage): void {
@@ -1206,11 +1265,6 @@ export async function trySubmitToRunningOwner(
     return undefined;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(options.sessionId, owner);
-    return undefined;
-  }
-
   const submitted = await submitToQueueOwner(owner, options);
   if (submitted) {
     if (options.verbose) {
@@ -1221,8 +1275,8 @@ export async function trySubmitToRunningOwner(
     return submitted;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(options.sessionId, owner);
+  const health = await probeQueueOwnerHealth(options.sessionId);
+  if (!health.hasLease) {
     return undefined;
   }
 
@@ -1245,11 +1299,6 @@ export async function tryCancelOnRunningOwner(options: {
     return undefined;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(options.sessionId, owner);
-    return undefined;
-  }
-
   const cancelled = await submitCancelToQueueOwner(owner);
   if (cancelled !== undefined) {
     if (options.verbose) {
@@ -1260,8 +1309,8 @@ export async function tryCancelOnRunningOwner(options: {
     return cancelled;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(options.sessionId, owner);
+  const health = await probeQueueOwnerHealth(options.sessionId);
+  if (!health.hasLease) {
     return undefined;
   }
 
@@ -1286,11 +1335,6 @@ export async function trySetModeOnRunningOwner(
     return undefined;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(sessionId, owner);
-    return undefined;
-  }
-
   const submitted = await submitSetModeToQueueOwner(owner, modeId, timeoutMs);
   if (submitted) {
     if (verbose) {
@@ -1301,8 +1345,8 @@ export async function trySetModeOnRunningOwner(
     return true;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(sessionId, owner);
+  const health = await probeQueueOwnerHealth(sessionId);
+  if (!health.hasLease) {
     return undefined;
   }
 
@@ -1328,11 +1372,6 @@ export async function trySetConfigOptionOnRunningOwner(
     return undefined;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(sessionId, owner);
-    return undefined;
-  }
-
   const response = await submitSetConfigOptionToQueueOwner(
     owner,
     configId,
@@ -1348,8 +1387,8 @@ export async function trySetConfigOptionOnRunningOwner(
     return response;
   }
 
-  if (!isProcessAlive(owner.pid)) {
-    await cleanupStaleQueueOwner(sessionId, owner);
+  const health = await probeQueueOwnerHealth(sessionId);
+  if (!health.hasLease) {
     return undefined;
   }
 

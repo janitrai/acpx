@@ -12,6 +12,7 @@ import {
   clientOperationToEventDraft,
   createAcpxEvent,
   errorToEventDraft,
+  isAcpxEvent,
   sessionUpdateToEventDrafts,
 } from "./events.js";
 import { ACPX_EVENT_TYPES } from "./types.js";
@@ -876,6 +877,9 @@ class JsonOutputFormatter implements OutputFormatter {
   }
 
   onEvent(event: AcpxEvent): void {
+    if (!isAcpxEvent(event)) {
+      throw new Error("Attempted to render invalid acpx.event.v1 payload");
+    }
     this.sessionId = event.session_id || this.sessionId;
     this.acpSessionId = event.acp_session_id || this.acpSessionId;
     this.agentSessionId = event.agent_session_id || this.agentSessionId;
@@ -939,6 +943,9 @@ class JsonOutputFormatter implements OutputFormatter {
       },
       draft,
     );
+    if (!isAcpxEvent(event)) {
+      throw new Error("Attempted to render invalid acpx.event.v1 payload");
+    }
     this.nextSeq += 1;
     this.stdout.write(JSON.stringify(event) + "\n");
   }

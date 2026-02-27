@@ -1,11 +1,14 @@
 import type { SessionNotification, StopReason } from "@agentclientprotocol/sdk";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AcpClient, type AgentLifecycleSnapshot } from "./client.js";
 import {
   clientOperationToEventDraft,
   createAcpxEvent,
   errorToEventDraft,
+  isAcpxEvent,
   sessionUpdateToEventDrafts,
   truncateInputPreview,
 } from "./events.js";
@@ -90,6 +93,10 @@ import {
 
 export const DEFAULT_QUEUE_OWNER_TTL_MS = 300_000;
 const INTERRUPT_CANCEL_WAIT_MS = 2_500;
+const QUEUE_OWNER_STARTUP_MAX_ATTEMPTS = 120;
+const QUEUE_OWNER_MAIN_PATH = fileURLToPath(
+  new URL("./queue-owner-main.js", import.meta.url),
+);
 
 type TimedRunOptions = {
   timeoutMs?: number;
@@ -545,6 +552,9 @@ async function runSessionPrompt(
 
   const emitEvent = (draft: AcpxEventDraft): AcpxEvent => {
     const event = eventWriter.createEvent(draft);
+    if (!isAcpxEvent(event)) {
+      throw new Error("Attempted to emit invalid acpx.event.v1 payload");
+    }
     pendingEvents.push(event);
     output.onEvent(event);
     return event;
@@ -1123,12 +1133,50 @@ export async function ensureSession(
   };
 }
 
-export async function sendSession(
-  options: SessionSendOptions,
-): Promise<SessionSendOutcome> {
-  const waitForCompletion = options.waitForCompletion !== false;
+export type QueueOwnerRuntimeOptions = {
+  sessionId: string;
+  permissionMode: PermissionMode;
+  nonInteractivePermissions?: NonInteractivePermissionPolicy;
+  authCredentials?: Record<string, string>;
+  authPolicy?: AuthPolicy;
+  suppressSdkConsoleErrors?: boolean;
+  verbose?: boolean;
+  ttlMs?: number;
+};
 
-  const queuedToOwner = await trySubmitToRunningOwner({
+function queueOwnerRuntimeOptionsFromSend(
+  options: SessionSendOptions,
+): QueueOwnerRuntimeOptions {
+  return {
+    sessionId: options.sessionId,
+    permissionMode: options.permissionMode,
+    nonInteractivePermissions: options.nonInteractivePermissions,
+    authCredentials: options.authCredentials,
+    authPolicy: options.authPolicy,
+    suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
+    verbose: options.verbose,
+    ttlMs: options.ttlMs,
+  };
+}
+
+function spawnQueueOwnerProcess(options: QueueOwnerRuntimeOptions): void {
+  const payload = JSON.stringify(options);
+  const child = spawn(process.execPath, [QUEUE_OWNER_MAIN_PATH], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      ACPX_QUEUE_OWNER_PAYLOAD: payload,
+    },
+  });
+  child.unref();
+}
+
+async function submitToRunningOwner(
+  options: SessionSendOptions,
+  waitForCompletion: boolean,
+): Promise<SessionSendOutcome | undefined> {
+  return await trySubmitToRunningOwner({
     sessionId: options.sessionId,
     message: options.message,
     permissionMode: options.permissionMode,
@@ -1140,134 +1188,129 @@ export async function sendSession(
     waitForCompletion,
     verbose: options.verbose,
   });
-  if (queuedToOwner) {
-    return queuedToOwner;
+}
+
+export async function runSessionQueueOwner(
+  options: QueueOwnerRuntimeOptions,
+): Promise<void> {
+  const lease = await tryAcquireQueueOwnerLease(options.sessionId);
+  if (!lease) {
+    return;
   }
 
-  for (;;) {
-    const lease = await tryAcquireQueueOwnerLease(options.sessionId);
-    if (!lease) {
-      const retryQueued = await trySubmitToRunningOwner({
-        sessionId: options.sessionId,
-        message: options.message,
-        permissionMode: options.permissionMode,
+  let owner: SessionQueueOwner | undefined;
+  const ttlMs = normalizeQueueOwnerTtlMs(options.ttlMs);
+  const taskPollTimeoutMs = ttlMs === 0 ? undefined : ttlMs;
+  const initialTaskPollTimeoutMs =
+    taskPollTimeoutMs == null ? undefined : Math.max(taskPollTimeoutMs, 1_000);
+  const turnController = new QueueOwnerTurnController({
+    withTimeout: async (run, timeoutMs) => await withTimeout(run(), timeoutMs),
+    setSessionModeFallback: async (modeId: string, timeoutMs?: number) => {
+      await runSessionSetModeDirect({
+        sessionRecordId: options.sessionId,
+        modeId,
         nonInteractivePermissions: options.nonInteractivePermissions,
-        outputFormatter: options.outputFormatter,
-        errorEmissionPolicy: options.errorEmissionPolicy,
-        timeoutMs: options.timeoutMs,
-        suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
-        waitForCompletion,
+        authCredentials: options.authCredentials,
+        authPolicy: options.authPolicy,
+        timeoutMs,
         verbose: options.verbose,
       });
-      if (retryQueued) {
-        return retryQueued;
-      }
-      await waitMs(QUEUE_CONNECT_RETRY_MS);
-      continue;
-    }
+    },
+    setSessionConfigOptionFallback: async (
+      configId: string,
+      value: string,
+      timeoutMs?: number,
+    ) => {
+      const result = await runSessionSetConfigOptionDirect({
+        sessionRecordId: options.sessionId,
+        configId,
+        value,
+        nonInteractivePermissions: options.nonInteractivePermissions,
+        authCredentials: options.authCredentials,
+        authPolicy: options.authPolicy,
+        timeoutMs,
+        verbose: options.verbose,
+      });
+      return result.response;
+    },
+  });
 
-    let owner: SessionQueueOwner | undefined;
-    const turnController = new QueueOwnerTurnController({
-      withTimeout: async (run, timeoutMs) => await withTimeout(run(), timeoutMs),
-      setSessionModeFallback: async (modeId: string, timeoutMs?: number) => {
-        await runSessionSetModeDirect({
-          sessionRecordId: options.sessionId,
-          modeId,
-          nonInteractivePermissions: options.nonInteractivePermissions,
-          authCredentials: options.authCredentials,
-          authPolicy: options.authPolicy,
-          timeoutMs,
-          verbose: options.verbose,
-        });
+  const applyPendingCancel = async (): Promise<boolean> => {
+    return await turnController.applyPendingCancel();
+  };
+
+  const scheduleApplyPendingCancel = (): void => {
+    void applyPendingCancel().catch((error) => {
+      if (options.verbose) {
+        process.stderr.write(
+          `[acpx] failed to apply deferred cancel: ${formatErrorMessage(error)}\n`,
+        );
+      }
+    });
+  };
+
+  const setActiveController = (controller: ActiveSessionController) => {
+    turnController.setActiveController(controller);
+    scheduleApplyPendingCancel();
+  };
+
+  const clearActiveController = () => {
+    turnController.clearActiveController();
+  };
+
+  const runPromptTurn = async <T>(run: () => Promise<T>): Promise<T> => {
+    turnController.beginTurn();
+    try {
+      return await run();
+    } finally {
+      turnController.endTurn();
+    }
+  };
+
+  try {
+    owner = await SessionQueueOwner.start(lease, {
+      cancelPrompt: async () => {
+        const accepted = await turnController.requestCancel();
+        if (!accepted) {
+          return false;
+        }
+        await applyPendingCancel();
+        return true;
       },
-      setSessionConfigOptionFallback: async (
+      setSessionMode: async (modeId: string, timeoutMs?: number) => {
+        await turnController.setSessionMode(modeId, timeoutMs);
+      },
+      setSessionConfigOption: async (
         configId: string,
         value: string,
         timeoutMs?: number,
       ) => {
-        const result = await runSessionSetConfigOptionDirect({
-          sessionRecordId: options.sessionId,
-          configId,
-          value,
-          nonInteractivePermissions: options.nonInteractivePermissions,
-          authCredentials: options.authCredentials,
-          authPolicy: options.authPolicy,
-          timeoutMs,
-          verbose: options.verbose,
-        });
-        return result.response;
+        return await turnController.setSessionConfigOption(configId, value, timeoutMs);
       },
     });
 
-    const applyPendingCancel = async (): Promise<boolean> => {
-      return await turnController.applyPendingCancel();
-    };
+    if (options.verbose) {
+      process.stderr.write(
+        `[acpx] queue owner ready for session ${options.sessionId} (ttlMs=${ttlMs})\n`,
+      );
+    }
 
-    const scheduleApplyPendingCancel = (): void => {
-      void applyPendingCancel().catch((error) => {
-        if (options.verbose) {
-          process.stderr.write(
-            `[acpx] failed to apply deferred cancel: ${formatErrorMessage(error)}\n`,
-          );
-        }
-      });
-    };
-
-    const setActiveController = (controller: ActiveSessionController) => {
-      turnController.setActiveController(controller);
-      scheduleApplyPendingCancel();
-    };
-    const clearActiveController = () => {
-      turnController.clearActiveController();
-    };
-
-    const runPromptTurn = async <T>(run: () => Promise<T>): Promise<T> => {
-      turnController.beginTurn();
-      try {
-        return await run();
-      } finally {
-        turnController.endTurn();
+    let isFirstTask = true;
+    while (true) {
+      const pollTimeoutMs = isFirstTask ? initialTaskPollTimeoutMs : taskPollTimeoutMs;
+      const task = await owner.nextTask(pollTimeoutMs);
+      if (!task) {
+        break;
       }
-    };
+      isFirstTask = false;
 
-    try {
-      owner = await SessionQueueOwner.start(lease, {
-        cancelPrompt: async () => {
-          const accepted = await turnController.requestCancel();
-          if (!accepted) {
-            return false;
-          }
-          await applyPendingCancel();
-          return true;
-        },
-        setSessionMode: async (modeId: string, timeoutMs?: number) => {
-          await turnController.setSessionMode(modeId, timeoutMs);
-        },
-        setSessionConfigOption: async (
-          configId: string,
-          value: string,
-          timeoutMs?: number,
-        ) => {
-          return await turnController.setSessionConfigOption(
-            configId,
-            value,
-            timeoutMs,
-          );
-        },
-      });
-
-      const localResult = await runPromptTurn(async () => {
-        return await runSessionPrompt({
-          sessionRecordId: options.sessionId,
-          message: options.message,
-          permissionMode: options.permissionMode,
+      await runPromptTurn(async () => {
+        await runQueuedTask(options.sessionId, task, {
+          verbose: options.verbose,
           nonInteractivePermissions: options.nonInteractivePermissions,
           authCredentials: options.authCredentials,
           authPolicy: options.authPolicy,
-          outputFormatter: options.outputFormatter,
-          timeoutMs: options.timeoutMs,
           suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
-          verbose: options.verbose,
           onClientAvailable: setActiveController,
           onClientClosed: clearActiveController,
           onPromptActive: async () => {
@@ -1276,38 +1319,44 @@ export async function sendSession(
           },
         });
       });
-
-      while (true) {
-        const task = await owner.nextTask(0);
-        if (!task) {
-          break;
-        }
-        await runPromptTurn(async () => {
-          await runQueuedTask(options.sessionId, task, {
-            verbose: options.verbose,
-            nonInteractivePermissions: options.nonInteractivePermissions,
-            authCredentials: options.authCredentials,
-            authPolicy: options.authPolicy,
-            suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
-            onClientAvailable: setActiveController,
-            onClientClosed: clearActiveController,
-            onPromptActive: async () => {
-              turnController.markPromptActive();
-              await applyPendingCancel();
-            },
-          });
-        });
-      }
-
-      return localResult;
-    } finally {
-      turnController.beginClosing();
-      if (owner) {
-        await owner.close();
-      }
-      await releaseQueueOwnerLease(lease);
+    }
+  } finally {
+    turnController.beginClosing();
+    if (owner) {
+      await owner.close();
+    }
+    await releaseQueueOwnerLease(lease);
+    if (options.verbose) {
+      process.stderr.write(
+        `[acpx] queue owner stopped for session ${options.sessionId}\n`,
+      );
     }
   }
+}
+
+export async function sendSession(
+  options: SessionSendOptions,
+): Promise<SessionSendOutcome> {
+  const waitForCompletion = options.waitForCompletion !== false;
+
+  const queuedToOwner = await submitToRunningOwner(options, waitForCompletion);
+  if (queuedToOwner) {
+    return queuedToOwner;
+  }
+
+  spawnQueueOwnerProcess(queueOwnerRuntimeOptionsFromSend(options));
+
+  for (let attempt = 0; attempt < QUEUE_OWNER_STARTUP_MAX_ATTEMPTS; attempt += 1) {
+    const queued = await submitToRunningOwner(options, waitForCompletion);
+    if (queued) {
+      return queued;
+    }
+    await waitMs(QUEUE_CONNECT_RETRY_MS);
+  }
+
+  throw new Error(
+    `Session queue owner failed to start for session ${options.sessionId}`,
+  );
 }
 
 export async function cancelSessionPrompt(

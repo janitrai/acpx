@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { queuePaths } from "./queue-test-helpers.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
@@ -228,6 +229,50 @@ test("integration: terminal kill leaves no orphan sleep process", async () => {
   });
 });
 
+test("integration: prompt reuses warm queue owner pid across turns", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+
+    try {
+      const created = await runCli(
+        [...baseAgentArgs(cwd), "--format", "json", "sessions", "new"],
+        homeDir,
+      );
+      assert.equal(created.code, 0, created.stderr);
+      const createdEvent = JSON.parse(created.stdout.trim()) as {
+        session_id?: string;
+      };
+      const sessionId = createdEvent.session_id;
+      assert.equal(typeof sessionId, "string");
+
+      const first = await runCli(
+        [...baseAgentArgs(cwd), "--format", "quiet", "prompt", "echo first"],
+        homeDir,
+      );
+      assert.equal(first.code, 0, first.stderr);
+
+      const { lockPath } = queuePaths(homeDir, sessionId as string);
+      const lockOne = JSON.parse(await fs.readFile(lockPath, "utf8")) as {
+        pid?: number;
+      };
+      assert.equal(typeof lockOne.pid, "number");
+
+      const second = await runCli(
+        [...baseAgentArgs(cwd), "--format", "quiet", "prompt", "echo second"],
+        homeDir,
+      );
+      assert.equal(second.code, 0, second.stderr);
+
+      const lockTwo = JSON.parse(await fs.readFile(lockPath, "utf8")) as {
+        pid?: number;
+      };
+      assert.equal(lockTwo.pid, lockOne.pid);
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 test("integration: cancel yields cancelled stopReason without queue error", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
@@ -263,9 +308,13 @@ test("integration: cancel yields cancelled stopReason without queue error", asyn
           assert.equal(cancelResult.code, 0, cancelResult.stderr);
 
           const payload = JSON.parse(cancelResult.stdout.trim()) as {
-            cancelled: boolean;
+            type: string;
+            data: {
+              cancelled?: boolean;
+            };
           };
-          cancelled = payload.cancelled === true;
+          assert.equal(payload.type, "cancel_result");
+          cancelled = payload.data.cancelled === true;
           if (cancelled) {
             break;
           }
