@@ -305,7 +305,7 @@ function makeSessionRecord(
     lastSeq: overrides.lastSeq ?? 0,
     lastRequestId: overrides.lastRequestId,
     eventLog: overrides.eventLog ?? {
-      active_path: `.events.ndjson`,
+      active_path: `.stream.ndjson`,
       segment_count: 1,
       max_segment_bytes: 1024,
       max_segments: 1,

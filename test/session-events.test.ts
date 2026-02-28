@@ -9,7 +9,7 @@ import {
   resolveSessionRecord,
   writeSessionRecord,
 } from "../src/session-persistence.js";
-import { ACPX_EVENT_TYPES, type SessionRecord } from "../src/types.js";
+import type { SessionRecord } from "../src/types.js";
 
 async function withTempHome(run: (homeDir: string) => Promise<void>): Promise<void> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-events-home-"));
@@ -54,15 +54,16 @@ function makeSessionRecord(
     updated_at: now,
     cumulative_token_usage: {},
     request_token_usage: {},
+    acpx: {},
   };
 }
 
-test("listSessionEvents reads all configured event segments", async () => {
+test("listSessionEvents reads all configured stream segments", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
 
-    const sessionId = "session-events-max-window";
+    const sessionId = "session-stream-max-window";
     const record = makeSessionRecord(sessionId, cwd, 7);
     await writeSessionRecord(record);
 
@@ -72,30 +73,35 @@ test("listSessionEvents reads all configured event segments", async () => {
     });
 
     for (let index = 0; index < 8; index += 1) {
-      await writer.appendDraft({
-        type: ACPX_EVENT_TYPES.UPDATE,
-        data: {
-          update: `event-${index + 1}`,
+      await writer.appendMessage({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `event-${index + 1}` },
+          },
         },
-      });
+      } as never);
     }
     await writer.close({ checkpoint: true });
 
     const events = await listSessionEvents(sessionId);
     assert.equal(events.length, 8);
-    assert.deepEqual(
-      events.map((event) => event.seq),
-      [1, 2, 3, 4, 5, 6, 7, 8],
+    assert.equal(
+      events.every((event) => event.jsonrpc === "2.0"),
+      true,
     );
   });
 });
 
-test("SessionEventWriter stores actual segment_count instead of max_segments", async () => {
+test("SessionEventWriter stores actual segment_count and increments lastSeq", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = path.join(homeDir, "workspace");
     await fs.mkdir(cwd, { recursive: true });
 
-    const sessionId = "session-events-segment-count";
+    const sessionId = "session-stream-segment-count";
     const record = makeSessionRecord(sessionId, cwd, 7);
     await writeSessionRecord(record);
 
@@ -104,34 +110,87 @@ test("SessionEventWriter stores actual segment_count instead of max_segments", a
       maxSegments: 7,
     });
 
-    await writer.appendDraft({
-      type: ACPX_EVENT_TYPES.UPDATE,
-      data: {
-        update: "first",
+    await writer.appendMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "first" },
+        },
       },
-    });
+    } as never);
     assert.equal(writer.getRecord().eventLog.segment_count, 1);
 
-    await writer.appendDraft({
-      type: ACPX_EVENT_TYPES.UPDATE,
-      data: {
-        update: "second",
+    await writer.appendMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "second" },
+        },
       },
-    });
+    } as never);
     assert.equal(writer.getRecord().eventLog.segment_count, 2);
 
-    await writer.appendDraft({
-      type: ACPX_EVENT_TYPES.UPDATE,
-      data: {
-        update: "third",
-      },
-    });
+    await writer.appendMessage({
+      jsonrpc: "2.0",
+      id: "req-3",
+      result: { stopReason: "end_turn" },
+    } as never);
     assert.equal(writer.getRecord().eventLog.segment_count, 3);
+    assert.equal(writer.getRecord().lastSeq, 3);
+    assert.equal(writer.getRecord().lastRequestId, "req-3");
 
     await writer.close({ checkpoint: true });
 
     const stored = await resolveSessionRecord(sessionId);
     assert.equal(stored.eventLog.segment_count, 3);
     assert.equal(stored.eventLog.max_segments, 7);
+    assert.equal(stored.lastSeq, 3);
+  });
+});
+
+test("listSessionEvents skips malformed NDJSON lines", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const sessionId = "session-stream-skip-malformed";
+    const record = makeSessionRecord(sessionId, cwd, 5);
+    await writeSessionRecord(record);
+
+    await fs.mkdir(path.dirname(record.eventLog.active_path), { recursive: true });
+    const validOne = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "first" },
+        },
+      },
+    });
+    const validTwo = JSON.stringify({
+      jsonrpc: "2.0",
+      id: "req-2",
+      result: { stopReason: "end_turn" },
+    });
+    await fs.writeFile(
+      record.eventLog.active_path,
+      `${validOne}\n{invalid-json\n${validTwo}\n`,
+      "utf8",
+    );
+
+    const events = await listSessionEvents(sessionId);
+    assert.equal(events.length, 2);
+    assert.equal(
+      events.every((event) => event.jsonrpc === "2.0"),
+      true,
+    );
   });
 });

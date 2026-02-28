@@ -1,7 +1,8 @@
 import type {
   AgentCapabilities,
-  SessionConfigOption,
+  AnyMessage,
   SessionNotification,
+  SessionConfigOption,
   SetSessionConfigOptionResponse,
   StopReason,
 } from "@agentclientprotocol/sdk";
@@ -33,46 +34,8 @@ export type NonInteractivePermissionPolicy =
 
 export const OUTPUT_STREAMS = ["prompt", "control"] as const;
 export type OutputStream = (typeof OUTPUT_STREAMS)[number];
-
-export const ACPX_EVENT_SCHEMA = "acpx.event.v1" as const;
-export const ACPX_EVENT_OUTPUT_STREAMS = ["output", "thought"] as const;
-export type AcpxEventOutputStream = (typeof ACPX_EVENT_OUTPUT_STREAMS)[number];
-export const ACPX_EVENT_TYPES = {
-  TURN_STARTED: "turn_started",
-  OUTPUT_DELTA: "output_delta",
-  TOOL_CALL: "tool_call",
-  PLAN: "plan",
-  UPDATE: "update",
-  CLIENT_OPERATION: "client_operation",
-  TURN_DONE: "turn_done",
-  ERROR: "error",
-  PROMPT_QUEUED: "prompt_queued",
-  SESSION_ENSURED: "session_ensured",
-  CANCEL_REQUESTED: "cancel_requested",
-  CANCEL_RESULT: "cancel_result",
-  MODE_SET: "mode_set",
-  CONFIG_SET: "config_set",
-  STATUS_SNAPSHOT: "status_snapshot",
-  SESSION_CLOSED: "session_closed",
-} as const;
-export type AcpxEventType = (typeof ACPX_EVENT_TYPES)[keyof typeof ACPX_EVENT_TYPES];
-export const ACPX_EVENT_TURN_MODES = ["prompt"] as const;
-export type AcpxEventTurnMode = (typeof ACPX_EVENT_TURN_MODES)[number];
-export const ACPX_EVENT_STATUS_SNAPSHOT_STATUSES = [
-  "alive",
-  "dead",
-  "no-session",
-] as const;
-export type AcpxEventStatusSnapshotStatus =
-  (typeof ACPX_EVENT_STATUS_SNAPSHOT_STATUSES)[number];
-
-export const ACPX_EVENT_TOOL_CALL_STATUSES = [
-  "pending",
-  "in_progress",
-  "completed",
-  "failed",
-] as const;
-export type AcpxEventToolCallStatus = (typeof ACPX_EVENT_TOOL_CALL_STATUSES)[number];
+export type AcpJsonRpcMessage = AnyMessage;
+export type AcpMessageDirection = "outbound" | "inbound";
 
 export const OUTPUT_ERROR_CODES = [
   "NO_SESSION",
@@ -136,148 +99,6 @@ export type ClientOperation = {
   timestamp: string;
 };
 
-type AcpxEventEnvelope = {
-  schema: typeof ACPX_EVENT_SCHEMA;
-  event_id: string;
-  session_id: string;
-  acp_session_id?: string;
-  agent_session_id?: string;
-  request_id?: string;
-  seq: number;
-  ts: string;
-};
-
-export type AcpxEvent =
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.TURN_STARTED;
-      data: {
-        mode: AcpxEventTurnMode;
-        resumed: boolean;
-        input_preview?: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.OUTPUT_DELTA;
-      data: {
-        stream: AcpxEventOutputStream;
-        text: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.TOOL_CALL;
-      data: {
-        tool_call_id: string;
-        title?: string;
-        status?: AcpxEventToolCallStatus;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.PLAN;
-      data: {
-        entries: Array<{
-          content: string;
-          status: string;
-          priority: string;
-        }>;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.UPDATE;
-      data: {
-        update: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.CLIENT_OPERATION;
-      data: {
-        method: ClientOperationMethod;
-        status: ClientOperationStatus;
-        summary: string;
-        details?: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.TURN_DONE;
-      data: {
-        stop_reason: StopReason;
-        permission_stats?: PermissionStats;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.ERROR;
-      data: {
-        code: OutputErrorCode;
-        detail_code?: string;
-        origin?: OutputErrorOrigin;
-        message: string;
-        retryable?: boolean;
-        acp_error?: OutputErrorAcpPayload;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.PROMPT_QUEUED;
-      data: {
-        request_id: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.SESSION_ENSURED;
-      data: {
-        created: boolean;
-        name?: string;
-        replaced_session_id?: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.CANCEL_REQUESTED;
-      data: Record<string, never>;
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.CANCEL_RESULT;
-      data: {
-        cancelled: boolean;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.MODE_SET;
-      data: {
-        mode_id: string;
-        resumed?: boolean;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.CONFIG_SET;
-      data: {
-        config_id: string;
-        value: string;
-        resumed?: boolean;
-        config_options?: unknown[];
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.STATUS_SNAPSHOT;
-      data: {
-        status: AcpxEventStatusSnapshotStatus;
-        pid?: number;
-        summary?: string;
-        uptime?: string;
-        last_prompt_time?: string;
-        exit_code?: number;
-        signal?: string;
-      };
-    })
-  | (AcpxEventEnvelope & {
-      type: typeof ACPX_EVENT_TYPES.SESSION_CLOSED;
-      data: {
-        reason: "close";
-      };
-    });
-
-export type AcpxEventDraft = Omit<
-  AcpxEvent,
-  "schema" | "event_id" | "session_id" | "seq" | "ts"
->;
-
 export type SessionEventLog = {
   active_path: string;
   segment_count: number;
@@ -289,10 +110,6 @@ export type SessionEventLog = {
 
 export type OutputFormatterContext = {
   sessionId: string;
-  acpSessionId?: string;
-  agentSessionId?: string;
-  requestId?: string;
-  nextSeq?: number;
 };
 
 export type OutputPolicy = {
@@ -309,9 +126,7 @@ export type OutputErrorEmissionPolicy = {
 
 export interface OutputFormatter {
   setContext(context: OutputFormatterContext): void;
-  onEvent(event: AcpxEvent): void;
-  onSessionUpdate(notification: SessionNotification): void;
-  onClientOperation(operation: ClientOperation): void;
+  onAcpMessage(message: AcpJsonRpcMessage): void;
   onError(params: {
     code: OutputErrorCode;
     detailCode?: string;
@@ -321,7 +136,6 @@ export interface OutputFormatter {
     acp?: OutputErrorAcpPayload;
     timestamp?: string;
   }): void;
-  onDone(stopReason: StopReason): void;
   flush(): void;
 }
 
@@ -334,6 +148,7 @@ export type AcpClientOptions = {
   authPolicy?: AuthPolicy;
   suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
+  onAcpMessage?: (direction: AcpMessageDirection, message: AcpJsonRpcMessage) => void;
   onSessionUpdate?: (notification: SessionNotification) => void;
   onClientOperation?: (operation: ClientOperation) => void;
 };

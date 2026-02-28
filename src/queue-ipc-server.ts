@@ -1,13 +1,16 @@
 import type { SetSessionConfigOptionResponse } from "@agentclientprotocol/sdk";
 import net from "node:net";
 import { normalizeOutputError } from "./error-normalization.js";
-import type { QueueOwnerLease } from "./queue-lease-store.js";
 import {
   parseQueueRequest,
   type QueueOwnerErrorMessage,
   type QueueOwnerMessage,
 } from "./queue-messages.js";
 import type { NonInteractivePermissionPolicy, PermissionMode } from "./types.js";
+
+type QueueOwnerSocketLease = {
+  socketPath: string;
+};
 
 function makeQueueOwnerError(
   requestId: string,
@@ -97,7 +100,7 @@ export class SessionQueueOwner {
   }
 
   static async start(
-    lease: QueueOwnerLease,
+    lease: QueueOwnerSocketLease,
     controlHandlers: QueueOwnerControlHandlers,
   ): Promise<SessionQueueOwner> {
     const ownerRef: { current: SessionQueueOwner | undefined } = { current: undefined };

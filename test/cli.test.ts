@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { InvalidArgumentError } from "commander";
 import { formatPromptSessionBannerLine, parseTtlSeconds } from "../src/cli.js";
 import { serializeSessionRecordForDisk } from "../src/session-persistence.js";
-import type { AcpxEvent, SessionRecord } from "../src/types.js";
+import type { SessionRecord } from "../src/types.js";
 import {
   cleanupOwnerArtifacts,
   closeServer,
@@ -32,6 +32,40 @@ type CliRunResult = {
   stdout: string;
   stderr: string;
 };
+
+type ParsedAcpError = {
+  code?: number;
+  message?: string;
+  data?: {
+    acpxCode?: string;
+    detailCode?: string;
+    origin?: string;
+    sessionId?: string;
+  };
+};
+
+function parseSingleAcpErrorLine(stdout: string): ParsedAcpError {
+  const payload = JSON.parse(stdout.trim()) as {
+    jsonrpc?: string;
+    error?: ParsedAcpError;
+  };
+  assert.equal(payload.jsonrpc, "2.0");
+  assert.equal(typeof payload.error, "object");
+  return payload.error ?? {};
+}
+
+function parseJsonRpcLines(stdout: string): Array<Record<string, unknown>> {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  assert(lines.length > 0, "expected at least one stdout line");
+  return lines.map((line) => {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    assert.equal(parsed.jsonrpc, "2.0");
+    return parsed;
+  });
+}
 
 test("parseTtlSeconds parses and rounds valid numeric values", () => {
   assert.equal(parseTtlSeconds("30"), 30_000);
@@ -154,19 +188,19 @@ test("sessions ensure creates when missing and returns existing on subsequent ca
       homeDir,
     );
     assert.equal(first.code, 0, first.stderr);
-    const firstPayload = JSON.parse(first.stdout.trim()) as AcpxEvent;
-    assert.equal(firstPayload.type, "session_ensured");
-    assert.equal((firstPayload.data as { created?: boolean }).created, true);
+    const firstPayload = JSON.parse(first.stdout.trim()) as Record<string, unknown>;
+    assert.equal(firstPayload.action, "session_ensured");
+    assert.equal(firstPayload.created, true);
 
     const second = await runCli(
       ["--cwd", cwd, "--format", "json", "codex", "sessions", "ensure"],
       homeDir,
     );
     assert.equal(second.code, 0, second.stderr);
-    const secondPayload = JSON.parse(second.stdout.trim()) as AcpxEvent;
-    assert.equal(secondPayload.type, "session_ensured");
-    assert.equal((secondPayload.data as { created?: boolean }).created, false);
-    assert.equal(secondPayload.session_id, firstPayload.session_id);
+    const secondPayload = JSON.parse(second.stdout.trim()) as Record<string, unknown>;
+    assert.equal(secondPayload.action, "session_ensured");
+    assert.equal(secondPayload.created, false);
+    assert.equal(secondPayload.acpxRecordId, firstPayload.acpxRecordId);
   });
 });
 
@@ -192,10 +226,10 @@ test("sessions ensure resolves existing session by directory walk", async () => 
       homeDir,
     );
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.session_id, "parent-session");
-    assert.equal(payload.type, "session_ensured");
-    assert.equal((payload.data as { created?: boolean }).created, false);
+    const payload = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+    assert.equal(payload.acpxRecordId, "parent-session");
+    assert.equal(payload.action, "session_ensured");
+    assert.equal(payload.created, false);
   });
 });
 
@@ -243,29 +277,35 @@ test("sessions and status surface agentSessionId for codex and claude in JSON mo
         homeDir,
       );
       assert.equal(created.code, 0, created.stderr);
-      const createdPayload = JSON.parse(created.stdout.trim()) as AcpxEvent;
-      assert.equal(createdPayload.type, "session_ensured");
-      assert.equal((createdPayload.data as { created?: boolean }).created, true);
-      assert.equal(createdPayload.agent_session_id, scenario.expectedRuntimeSessionId);
+      const createdPayload = JSON.parse(created.stdout.trim()) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(createdPayload.action, "session_ensured");
+      assert.equal(createdPayload.created, true);
+      assert.equal(createdPayload.agentSessionId, scenario.expectedRuntimeSessionId);
 
       const ensured = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "sessions", "ensure"],
         homeDir,
       );
       assert.equal(ensured.code, 0, ensured.stderr);
-      const ensuredPayload = JSON.parse(ensured.stdout.trim()) as AcpxEvent;
-      assert.equal(ensuredPayload.type, "session_ensured");
-      assert.equal((ensuredPayload.data as { created?: boolean }).created, false);
-      assert.equal(ensuredPayload.agent_session_id, scenario.expectedRuntimeSessionId);
+      const ensuredPayload = JSON.parse(ensured.stdout.trim()) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(ensuredPayload.action, "session_ensured");
+      assert.equal(ensuredPayload.created, false);
+      assert.equal(ensuredPayload.agentSessionId, scenario.expectedRuntimeSessionId);
 
       const status = await runCli(
         ["--cwd", cwd, "--format", "json", scenario.agentName, "status"],
         homeDir,
       );
       assert.equal(status.code, 0, status.stderr);
-      const statusPayload = JSON.parse(status.stdout.trim()) as AcpxEvent;
-      assert.equal(statusPayload.type, "status_snapshot");
-      assert.equal(statusPayload.agent_session_id, scenario.expectedRuntimeSessionId);
+      const statusPayload = JSON.parse(status.stdout.trim()) as Record<string, unknown>;
+      assert.equal(statusPayload.action, "status_snapshot");
+      assert.equal(statusPayload.agentSessionId, scenario.expectedRuntimeSessionId);
     }
   });
 });
@@ -364,10 +404,10 @@ test("--non-interactive-permissions validates supported values", async () => {
       homeDir,
     );
     assert.equal(invalid.code, 2);
-    const payload = JSON.parse(invalid.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "error");
-    assert.equal(payload.data.code, "USAGE");
-    assert.match(payload.data.message, /Invalid non-interactive permission policy/);
+    const error = parseSingleAcpErrorLine(invalid.stdout);
+    assert.equal(error.code, -32602);
+    assert.equal(error.data?.acpxCode, "USAGE");
+    assert.match(error.message ?? "", /Invalid non-interactive permission policy/);
   });
 });
 
@@ -376,10 +416,10 @@ test("--json-strict requires --format json", async () => {
     const result = await runCli(["--json-strict", "sessions"], homeDir);
     assert.equal(result.code, 2);
     assert.equal(result.stderr.trim(), "");
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "error");
-    assert.equal(payload.data.code, "USAGE");
-    assert.match(payload.data.message, /--json-strict requires --format json/);
+    const error = parseSingleAcpErrorLine(result.stdout);
+    assert.equal(error.code, -32602);
+    assert.equal(error.data?.acpxCode, "USAGE");
+    assert.match(error.message ?? "", /--json-strict requires --format json/);
   });
 });
 
@@ -391,11 +431,11 @@ test("--json-strict rejects --verbose", async () => {
     );
     assert.equal(result.code, 2);
     assert.equal(result.stderr.trim(), "");
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "error");
-    assert.equal(payload.data.code, "USAGE");
+    const error = parseSingleAcpErrorLine(result.stdout);
+    assert.equal(error.code, -32602);
+    assert.equal(error.data?.acpxCode, "USAGE");
     assert.match(
-      payload.data.message,
+      error.message ?? "",
       /--json-strict cannot be combined with --verbose/,
     );
   });
@@ -463,12 +503,99 @@ test("queued prompt failures emit exactly one JSON error event", async () => {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.length > 0)
-        .map((line) => JSON.parse(line) as AcpxEvent);
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-      const errors = events.filter((event) => event.type === "error");
+      const errors = events.filter(
+        (event) => typeof event.error === "object" && event.error !== null,
+      );
       assert.equal(errors.length, 1, writeResult.stdout);
-      assert.equal(errors[0]?.data.code, "PERMISSION_PROMPT_UNAVAILABLE");
-      assert.notEqual(errors[0]?.session_id, "unknown");
+      assert.equal((errors[0]?.error as { code?: unknown } | undefined)?.code, -32603);
+      assert.notEqual(
+        (errors[0]?.error as { data?: { sessionId?: unknown } } | undefined)?.data
+          ?.sessionId,
+        "unknown",
+      );
+    } finally {
+      if (blocker.exitCode === null && blocker.signalCode == null) {
+        blocker.kill("SIGKILL");
+        await new Promise<void>((resolve) => {
+          blocker.once("close", () => resolve());
+        });
+      }
+    }
+  });
+});
+
+test("json-strict queued prompt failure emits JSON-RPC lines only", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(path.join(homeDir, ".acpx"), { recursive: true });
+    await fs.writeFile(
+      path.join(homeDir, ".acpx", "config.json"),
+      `${JSON.stringify(
+        {
+          agents: {
+            codex: {
+              command: MOCK_AGENT_COMMAND,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const session = await runCli(
+      ["--cwd", cwd, "--format", "json", "codex", "sessions", "new"],
+      homeDir,
+    );
+    assert.equal(session.code, 0, session.stderr);
+
+    const blocker = spawn(
+      process.execPath,
+      [CLI_PATH, "--cwd", cwd, "codex", "prompt", "sleep 1500"],
+      {
+        env: { ...process.env, HOME: homeDir },
+        stdio: ["ignore", "ignore", "ignore"],
+      },
+    );
+
+    try {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 200);
+      });
+
+      const writeResult = await runCli(
+        [
+          "--cwd",
+          cwd,
+          "--format",
+          "json",
+          "--json-strict",
+          "--non-interactive-permissions",
+          "fail",
+          "codex",
+          "prompt",
+          `write ${path.join(cwd, "x.txt")} hi`,
+        ],
+        homeDir,
+      );
+
+      assert.equal(writeResult.code, 5, writeResult.stderr);
+      assert.equal(writeResult.stderr.trim(), "");
+
+      const events = parseJsonRpcLines(writeResult.stdout);
+      assert.equal(
+        events.some(
+          (event) =>
+            typeof event.error === "object" &&
+            event.error !== null &&
+            typeof (event.error as { code?: unknown }).code === "number",
+        ),
+        true,
+      );
     } finally {
       if (blocker.exitCode === null && blocker.signalCode == null) {
         blocker.kill("SIGKILL");
@@ -537,7 +664,7 @@ test("queued prompt failures remain visible in quiet mode", async () => {
       );
 
       assert.equal(writeResult.code, 5);
-      assert.equal(writeResult.stdout.trim(), "");
+      assert.match(writeResult.stdout, /error:\s*Internal error/i);
       assert.match(
         writeResult.stderr,
         /Permission prompt unavailable in non-interactive mode/,
@@ -580,10 +707,10 @@ test("--json-strict suppresses session banners on stderr", async () => {
     );
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stderr.trim(), "");
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "session_ensured");
-    assert.equal((payload.data as { created?: boolean }).created, true);
-    assert.equal(typeof payload.session_id, "string");
+    const payload = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+    assert.equal(payload.action, "session_ensured");
+    assert.equal(payload.created, true);
+    assert.equal(typeof payload.acpxRecordId, "string");
   });
 });
 
@@ -615,10 +742,10 @@ test("json format emits structured no-session error event", async () => {
       homeDir,
     );
     assert.equal(result.code, 4);
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "error");
-    assert.equal(payload.data.code, "NO_SESSION");
-    assert.match(payload.data.message, /No acpx session found/);
+    const error = parseSingleAcpErrorLine(result.stdout);
+    assert.equal(error.code, -32002);
+    assert.equal(error.data?.acpxCode, "NO_SESSION");
+    assert.match(error.message ?? "", /No acpx session found/);
   });
 });
 
@@ -683,10 +810,10 @@ test("cancel resolves named session when -s is before subcommand", async () => {
     );
 
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "cancel_result");
-    assert.equal(payload.session_id, "named-cancel-session");
-    assert.equal((payload.data as { cancelled?: boolean }).cancelled, false);
+    const payload = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+    assert.equal(payload.action, "cancel_result");
+    assert.equal(payload.acpxRecordId, "named-cancel-session");
+    assert.equal(payload.cancelled, false);
   });
 });
 
@@ -712,12 +839,12 @@ test("status resolves named session when -s is before subcommand", async () => {
     );
 
     assert.equal(result.code, 0, result.stderr);
-    const payload = JSON.parse(result.stdout.trim()) as AcpxEvent;
-    assert.equal(payload.type, "status_snapshot");
-    assert.equal(payload.session_id, "named-status-session");
-    assert.equal((payload.data as { status?: string }).status, "dead");
-    assert.notEqual((payload.data as { status?: string }).status, "no-session");
-    assert.equal(payload.agent_session_id, undefined);
+    const payload = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+    assert.equal(payload.action, "status_snapshot");
+    assert.equal(payload.acpxRecordId, "named-status-session");
+    assert.equal(payload.status, "dead");
+    assert.notEqual(payload.status, "no-session");
+    assert.equal(payload.agentSessionId, undefined);
   });
 });
 
@@ -1109,7 +1236,7 @@ function makeSessionRecord(
     lastSeq: record.lastSeq ?? 0,
     lastRequestId: record.lastRequestId,
     eventLog: record.eventLog ?? {
-      active_path: `.events.ndjson`,
+      active_path: `.stream.ndjson`,
       segment_count: 1,
       max_segment_bytes: 1024,
       max_segments: 1,

@@ -20,7 +20,7 @@ function makeRecord(): SessionRecord {
     lastSeq: 4,
     lastRequestId: "req-1",
     eventLog: {
-      active_path: "/tmp/record-1.events.ndjson",
+      active_path: "/tmp/record-1.stream.ndjson",
       segment_count: 2,
       max_segment_bytes: 1024,
       max_segments: 2,

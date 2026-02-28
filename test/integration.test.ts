@@ -19,6 +19,19 @@ type CliRunResult = {
   stderr: string;
 };
 
+function parseJsonRpcOutputLines(stdout: string): Array<Record<string, unknown>> {
+  const lines = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  assert(lines.length > 0, "expected at least one JSON-RPC line");
+  return lines.map((line) => {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    assert.equal(parsed.jsonrpc, "2.0");
+    return parsed;
+  });
+}
+
 test("integration: exec echo baseline", async () => {
   await withTempHome(async (homeDir) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
@@ -55,11 +68,22 @@ test("integration: timeout emits structured TIMEOUT json error", async () => {
         .trim()
         .split("\n")
         .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as { type?: string; data?: { code?: string } });
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              jsonrpc?: string;
+              error?: { code?: number; data?: { acpxCode?: string } };
+            },
+        );
       assert(payloads.length > 0, "expected at least one JSON payload");
-      const timeoutError = payloads.find((payload) => payload.type === "error");
-      assert(timeoutError, `expected error event in output:\n${result.stdout}`);
-      assert.equal(timeoutError.data?.code, "TIMEOUT");
+      const timeoutError = payloads.find(
+        (payload) =>
+          payload.jsonrpc === "2.0" && payload.error?.data?.acpxCode === "TIMEOUT",
+      );
+      assert(
+        timeoutError,
+        `expected timeout error payload in output:\n${result.stdout}`,
+      );
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
@@ -94,11 +118,19 @@ test("integration: non-interactive fail emits structured permission error", asyn
         .trim()
         .split("\n")
         .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as { type?: string; data?: { code?: string } });
+        .map(
+          (line) =>
+            JSON.parse(line) as { jsonrpc?: string; error?: { code?: unknown } },
+        );
       assert(payloads.length > 0, "expected at least one JSON payload");
-      const permissionError = payloads.find((payload) => payload.type === "error");
-      assert(permissionError, `expected error event in output:\n${result.stdout}`);
-      assert.equal(permissionError.data?.code, "PERMISSION_PROMPT_UNAVAILABLE");
+      const permissionError = payloads.find(
+        (payload) =>
+          payload.jsonrpc === "2.0" && typeof payload.error?.code === "number",
+      );
+      assert(
+        permissionError,
+        `expected ACP error response in output:\n${result.stdout}`,
+      );
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
@@ -136,11 +168,49 @@ test("integration: json-strict suppresses runtime stderr diagnostics", async () 
         .trim()
         .split("\n")
         .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as { type?: string; data?: { code?: string } });
+        .map(
+          (line) =>
+            JSON.parse(line) as { jsonrpc?: string; error?: { code?: unknown } },
+        );
       assert(payloads.length > 0, "expected at least one JSON payload");
-      const permissionError = payloads.find((payload) => payload.type === "error");
-      assert(permissionError, `expected error event in output:\n${result.stdout}`);
-      assert.equal(permissionError.data?.code, "PERMISSION_PROMPT_UNAVAILABLE");
+      const permissionError = payloads.find(
+        (payload) =>
+          payload.jsonrpc === "2.0" && typeof payload.error?.code === "number",
+      );
+      assert(
+        permissionError,
+        `expected ACP error response in output:\n${result.stdout}`,
+      );
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+test("integration: json-strict exec success emits JSON-RPC lines only", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+
+    try {
+      const result = await runCli(
+        [
+          ...baseAgentArgs(cwd),
+          "--format",
+          "json",
+          "--json-strict",
+          "exec",
+          "echo strict-success",
+        ],
+        homeDir,
+      );
+
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stderr.trim(), "");
+      const payloads = parseJsonRpcOutputLines(result.stdout);
+      assert(
+        payloads.some((payload) => Object.hasOwn(payload, "result")),
+        "expected at least one JSON-RPC result payload",
+      );
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }
@@ -241,9 +311,9 @@ test("integration: prompt reuses warm queue owner pid across turns", async () =>
       );
       assert.equal(created.code, 0, created.stderr);
       const createdEvent = JSON.parse(created.stdout.trim()) as {
-        session_id?: string;
+        acpxRecordId?: string;
       };
-      const sessionId = createdEvent.session_id;
+      const sessionId = createdEvent.acpxRecordId;
       assert.equal(typeof sessionId, "string");
 
       const first = await runCli(
@@ -304,9 +374,9 @@ test("integration: prompt recovers when loadSession fails on empty session", asy
       );
       assert.equal(created.code, 0, created.stderr);
       const createdEvent = JSON.parse(created.stdout.trim()) as {
-        session_id?: string;
+        acpxRecordId?: string;
       };
-      const originalSessionId = createdEvent.session_id;
+      const originalSessionId = createdEvent.acpxRecordId;
       assert.equal(typeof originalSessionId, "string");
 
       const prompt = await runCli(
@@ -329,14 +399,17 @@ test("integration: prompt recovers when loadSession fails on empty session", asy
         .trim()
         .split("\n")
         .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as { type?: string });
+        .map(
+          (line) =>
+            JSON.parse(line) as { jsonrpc?: string; result?: { stopReason?: string } },
+        );
       assert.equal(
-        payloads.some((payload) => payload.type === "error"),
-        false,
+        payloads.some((payload) => Object.hasOwn(payload, "error")),
+        true,
         prompt.stdout,
       );
       assert.equal(
-        payloads.some((payload) => payload.type === "turn_done"),
+        payloads.some((payload) => payload.result?.stopReason === "end_turn"),
         true,
         prompt.stdout,
       );
@@ -406,13 +479,11 @@ test("integration: cancel yields cancelled stopReason without queue error", asyn
           assert.equal(cancelResult.code, 0, cancelResult.stderr);
 
           const payload = JSON.parse(cancelResult.stdout.trim()) as {
-            type: string;
-            data: {
-              cancelled?: boolean;
-            };
+            action?: string;
+            cancelled?: boolean;
           };
-          assert.equal(payload.type, "cancel_result");
-          cancelled = payload.data.cancelled === true;
+          assert.equal(payload.action, "cancel_result");
+          cancelled = payload.cancelled === true;
           if (cancelled) {
             break;
           }
@@ -428,15 +499,12 @@ test("integration: cancel yields cancelled stopReason without queue error", asyn
 
         const promptResult = await doneEventPromise;
         assert.equal(
-          promptResult.events.some(
-            (event) =>
-              event.type === "turn_done" && event.data?.stop_reason === "cancelled",
-          ),
+          promptResult.events.some((event) => event.result?.stopReason === "cancelled"),
           true,
           promptResult.stdout,
         );
         assert.equal(
-          promptResult.events.some((event) => event.type === "error"),
+          promptResult.events.some((event) => Object.hasOwn(event, "error")),
           false,
           promptResult.stdout,
         );
@@ -601,10 +669,15 @@ async function runCli(
 }
 
 type PromptEvent = {
-  type?: string;
-  data?: {
-    stop_reason?: string;
-    code?: string;
+  jsonrpc?: string;
+  method?: string;
+  params?: unknown;
+  result?: {
+    stopReason?: string;
+  };
+  error?: {
+    code?: unknown;
+    message?: string;
   };
 };
 
@@ -660,7 +733,7 @@ async function waitForPromptDoneEvent(
       }
 
       events.push(event);
-      if (event.type === "turn_done") {
+      if (event.result?.stopReason) {
         finish(() => {
           resolve({
             events,

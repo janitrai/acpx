@@ -28,16 +28,7 @@ const NOOP_OUTPUT_FORMATTER: OutputFormatter = {
   setContext() {
     // no-op
   },
-  onEvent() {
-    // no-op
-  },
-  onSessionUpdate() {
-    // no-op
-  },
-  onClientOperation() {
-    // no-op
-  },
-  onDone() {
+  onAcpMessage() {
     // no-op
   },
   onError() {
@@ -334,19 +325,14 @@ test("trySubmitToRunningOwner streams queued lifecycle and returns result", asyn
     const events: string[] = [];
     const formatter: OutputFormatter = {
       setContext(context) {
-        events.push(`context:${context.sessionId}:${context.requestId ?? "-"}`);
+        events.push(`context:${context.sessionId}`);
       },
-      onEvent(event) {
-        events.push(`event:${event.type}`);
-      },
-      onSessionUpdate() {
-        // queue transport forwards canonical events only
-      },
-      onClientOperation() {
-        // queue transport forwards canonical events only
-      },
-      onDone() {
-        // queue transport forwards canonical events only
+      onAcpMessage(message) {
+        if ("method" in message && typeof message.method === "string") {
+          events.push(`event:${message.method}`);
+          return;
+        }
+        events.push("event:response");
       },
       onError(params) {
         events.push(`error:${params.code}`);
@@ -381,18 +367,15 @@ test("trySubmitToRunningOwner streams queued lifecycle and returns result", asyn
           `${JSON.stringify({
             type: "event",
             requestId: request.requestId,
-            event: {
-              schema: "acpx.event.v1",
-              event_id: "evt-queued-1",
-              session_id: sessionId,
-              acp_session_id: "agent-session",
-              seq: 1,
-              ts: "2026-01-01T00:00:00.000Z",
-              type: "turn_started",
-              data: {
-                mode: "prompt",
-                resumed: true,
-                input_preview: "hello",
+            message: {
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: {
+                sessionId: "agent-session",
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: "hello" },
+                },
               },
             },
           })}\n`,
@@ -421,7 +404,7 @@ test("trySubmitToRunningOwner streams queued lifecycle and returns result", asyn
                 lastUsedAt: "2026-01-01T00:00:00.000Z",
                 lastSeq: 2,
                 eventLog: {
-                  active_path: "/tmp/session.events.ndjson",
+                  active_path: "/tmp/session.stream.ndjson",
                   segment_count: 1,
                   max_segment_bytes: 1024,
                   max_segments: 1,
@@ -461,10 +444,10 @@ test("trySubmitToRunningOwner streams queued lifecycle and returns result", asyn
       assert.equal(result.stopReason, "end_turn");
       assert.equal(result.resumed, true);
       assert.equal(
-        events.some((entry) => entry.startsWith(`context:${sessionId}:`)),
+        events.some((entry) => entry === `context:${sessionId}`),
         true,
       );
-      assert.equal(events.includes("event:turn_started"), true);
+      assert.equal(events.includes("event:session/update"), true);
       assert.equal(events.includes("flush"), true);
       assert.equal(
         events.some((entry) => entry.startsWith("error:")),

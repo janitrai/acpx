@@ -2,6 +2,7 @@ import {
   ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
+  type AnyMessage,
   type AuthMethod,
   type CreateTerminalRequest,
   type CreateTerminalResponse,
@@ -393,7 +394,7 @@ export class AcpClient {
 
     const input = Writable.toWeb(child.stdin);
     const output = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(input, output);
+    const stream = this.createTappedStream(ndJsonStream(input, output));
 
     const connection = new ClientSideConnection(
       () => ({
@@ -481,6 +482,56 @@ export class AcpClient {
       child.kill();
       throw error;
     }
+  }
+
+  private createTappedStream(base: {
+    readable: ReadableStream<AnyMessage>;
+    writable: WritableStream<AnyMessage>;
+  }): {
+    readable: ReadableStream<AnyMessage>;
+    writable: WritableStream<AnyMessage>;
+  } {
+    const onAcpMessage = this.options.onAcpMessage;
+
+    if (!onAcpMessage) {
+      return base;
+    }
+
+    const readable = new ReadableStream<AnyMessage>({
+      async start(controller) {
+        const reader = base.readable.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              break;
+            }
+            if (!value) {
+              continue;
+            }
+            onAcpMessage("inbound", value);
+            controller.enqueue(value);
+          }
+        } finally {
+          reader.releaseLock();
+          controller.close();
+        }
+      },
+    });
+
+    const writable = new WritableStream<AnyMessage>({
+      async write(message) {
+        onAcpMessage("outbound", message);
+        const writer = base.writable.getWriter();
+        try {
+          await writer.write(message);
+        } finally {
+          writer.releaseLock();
+        }
+      },
+    });
+
+    return { readable, writable };
   }
 
   async createSession(cwd = this.options.cwd): Promise<SessionCreateResult> {

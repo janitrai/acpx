@@ -1,5 +1,5 @@
 import type { SetSessionConfigOptionResponse } from "@agentclientprotocol/sdk";
-import { isAcpxEvent } from "./events.js";
+import { isAcpJsonRpcMessage } from "./acp-jsonrpc.js";
 import {
   OUTPUT_ERROR_CODES,
   OUTPUT_ERROR_ORIGINS,
@@ -8,7 +8,7 @@ import {
   type OutputErrorOrigin,
 } from "./types.js";
 import type {
-  AcpxEvent,
+  AcpJsonRpcMessage,
   NonInteractivePermissionPolicy,
   PermissionMode,
   SessionSendResult,
@@ -59,7 +59,7 @@ export type QueueOwnerAcceptedMessage = {
 export type QueueOwnerEventMessage = {
   type: "event";
   requestId: string;
-  event: AcpxEvent;
+  message: AcpJsonRpcMessage;
 };
 
 export type QueueOwnerResultMessage = {
@@ -315,14 +315,14 @@ export function parseQueueOwnerMessage(raw: unknown): QueueOwnerMessage | null {
   }
 
   if (message.type === "event") {
-    if (!isAcpxEvent(message.event)) {
+    if (!isAcpJsonRpcMessage(message.message)) {
       return null;
     }
 
     return {
       type: "event",
       requestId: message.requestId,
-      event: message.event,
+      message: message.message,
     };
   }
 

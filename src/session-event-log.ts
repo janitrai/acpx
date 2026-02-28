@@ -14,18 +14,18 @@ export function safeSessionId(sessionId: string): string {
 }
 
 export function sessionEventActivePath(sessionId: string): string {
-  return path.join(sessionBaseDir(), `${safeSessionId(sessionId)}.events.ndjson`);
+  return path.join(sessionBaseDir(), `${safeSessionId(sessionId)}.stream.ndjson`);
 }
 
 export function sessionEventSegmentPath(sessionId: string, segment: number): string {
   return path.join(
     sessionBaseDir(),
-    `${safeSessionId(sessionId)}.events.${segment}.ndjson`,
+    `${safeSessionId(sessionId)}.stream.${segment}.ndjson`,
   );
 }
 
 export function sessionEventLockPath(sessionId: string): string {
-  return path.join(sessionBaseDir(), `${safeSessionId(sessionId)}.events.lock`);
+  return path.join(sessionBaseDir(), `${safeSessionId(sessionId)}.stream.lock`);
 }
 
 export function defaultSessionEventLog(sessionId: string): SessionEventLog {

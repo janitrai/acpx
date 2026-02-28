@@ -1,94 +1,113 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isAcpxEvent } from "../src/events.js";
-import { ACPX_EVENT_TYPES } from "../src/types.js";
+import { isAcpJsonRpcMessage } from "../src/acp-jsonrpc.js";
 
-function makeEvent(type: string, data: Record<string, unknown>): unknown {
-  return {
-    schema: "acpx.event.v1",
-    event_id: "evt-1",
-    session_id: "session-1",
-    seq: 0,
-    ts: "2026-01-01T00:00:00.000Z",
-    type,
-    data,
-  };
-}
-
-test("isAcpxEvent accepts structured tool_call payload", () => {
-  const event = makeEvent(ACPX_EVENT_TYPES.TOOL_CALL, {
-    tool_call_id: "call_123",
-    title: "read_file",
-    status: "in_progress",
-  });
-
-  assert.equal(isAcpxEvent(event), true);
-});
-
-test("isAcpxEvent rejects tool_call payload without tool_call_id", () => {
-  const event = makeEvent(ACPX_EVENT_TYPES.TOOL_CALL, {
-    title: "read_file",
-    status: "in_progress",
-  });
-
-  assert.equal(isAcpxEvent(event), false);
-});
-
-test("isAcpxEvent accepts structured plan payload", () => {
-  const event = makeEvent(ACPX_EVENT_TYPES.PLAN, {
-    entries: [
-      {
-        content: "Implement health probe",
-        status: "in_progress",
-        priority: "high",
+test("isAcpJsonRpcMessage accepts JSON-RPC request", () => {
+  assert.equal(
+    isAcpJsonRpcMessage({
+      jsonrpc: "2.0",
+      id: "req-1",
+      method: "session/prompt",
+      params: {
+        sessionId: "session-1",
+        prompt: [{ type: "text", text: "hi" }],
       },
-    ],
-  });
-
-  assert.equal(isAcpxEvent(event), true);
+    }),
+    true,
+  );
 });
 
-test("isAcpxEvent rejects malformed plan entries", () => {
-  const event = makeEvent(ACPX_EVENT_TYPES.PLAN, {
-    entries: [
-      {
-        content: "Missing priority",
-        status: "pending",
+test("isAcpJsonRpcMessage accepts JSON-RPC notification", () => {
+  assert.equal(
+    isAcpJsonRpcMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hello" },
+        },
       },
-    ],
-  });
-
-  assert.equal(isAcpxEvent(event), false);
+    }),
+    true,
+  );
 });
 
-test("isAcpxEvent validates new prompt_queued control event", () => {
-  const valid = makeEvent(ACPX_EVENT_TYPES.PROMPT_QUEUED, {
-    request_id: "req-1",
-  });
-  const invalid = makeEvent(ACPX_EVENT_TYPES.PROMPT_QUEUED, {
-    request_id: 1,
-  });
-
-  assert.equal(isAcpxEvent(valid), true);
-  assert.equal(isAcpxEvent(invalid), false);
+test("isAcpJsonRpcMessage accepts JSON-RPC success response", () => {
+  assert.equal(
+    isAcpJsonRpcMessage({
+      jsonrpc: "2.0",
+      id: "req-1",
+      result: { stopReason: "end_turn" },
+    }),
+    true,
+  );
 });
 
-test("isAcpxEvent validates status_snapshot optional fields", () => {
-  const valid = makeEvent(ACPX_EVENT_TYPES.STATUS_SNAPSHOT, {
-    status: "dead",
-    pid: 123,
-    summary: "queue owner unavailable",
-    uptime: "00:00:03",
-    last_prompt_time: "2026-01-01T00:00:00.000Z",
-    exit_code: 1,
-    signal: "SIGTERM",
-  });
+test("isAcpJsonRpcMessage accepts JSON-RPC error response", () => {
+  assert.equal(
+    isAcpJsonRpcMessage({
+      jsonrpc: "2.0",
+      id: "req-1",
+      error: {
+        code: -32000,
+        message: "runtime error",
+      },
+    }),
+    true,
+  );
+});
 
-  const invalid = makeEvent(ACPX_EVENT_TYPES.STATUS_SNAPSHOT, {
-    status: "dead",
-    pid: -1,
-  });
+test("isAcpJsonRpcMessage rejects non-JSON-RPC payload", () => {
+  assert.equal(
+    isAcpJsonRpcMessage({
+      type: "custom_event",
+      content: "hello",
+    }),
+    false,
+  );
+});
 
-  assert.equal(isAcpxEvent(valid), true);
-  assert.equal(isAcpxEvent(invalid), false);
+test("isAcpJsonRpcMessage accepts request/notification/response fixtures after roundtrip", () => {
+  const fixtures: unknown[] = [
+    {
+      jsonrpc: "2.0",
+      id: "req-1",
+      method: "session/prompt",
+      params: {
+        sessionId: "session-1",
+        prompt: [{ type: "text", text: "hi" }],
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hello" },
+        },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: "req-2",
+      result: { stopReason: "end_turn" },
+    },
+    {
+      jsonrpc: "2.0",
+      id: "req-3",
+      error: {
+        code: -32000,
+        message: "runtime error",
+      },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const roundTripped = JSON.parse(JSON.stringify(fixture));
+    assert.equal(isAcpJsonRpcMessage(roundTripped), true);
+  }
 });

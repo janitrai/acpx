@@ -385,50 +385,36 @@ When a prompt is already in flight for a session, `acpx` uses a per-session queu
 `--format` controls output mode:
 
 - `text` (default): human-readable stream
-- `json`: NDJSON event stream for automation
+- `json`: raw ACP NDJSON stream for automation
 - `quiet`: assistant text only
-- `--format json --json-strict`: same NDJSON stream, with non-JSON stderr output suppressed
+- `--format json --json-strict`: same ACP NDJSON stream, with non-JSON stderr output suppressed
 
 ### Prompt/exec output behavior
 
 - `text`: assistant text, tool status blocks, client-operation logs, plan updates, and `[done] <reason>`
-- `json`: one canonical `acpx.event.v1` object per line
+- `json`: one raw ACP JSON-RPC message per line
 - `quiet`: concatenated assistant text only
 
-Canonical event envelope:
+ACP message examples:
 
 ```json
-{
-  "schema": "acpx.event.v1",
-  "event_id": "...",
-  "session_id": "...",
-  "acp_session_id": "...",
-  "agent_session_id": "...",
-  "request_id": "...",
-  "seq": 12,
-  "ts": "2026-02-27T00:00:00.000Z",
-  "type": "output_delta",
-  "data": {
-    "stream": "output",
-    "text": "..."
-  }
-}
+{"jsonrpc":"2.0","id":"req-1","method":"session/prompt","params":{"sessionId":"019c...","prompt":"hi"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"}}}
+{"jsonrpc":"2.0","id":"req-1","result":{"stopReason":"end_turn"}}
 ```
 
-JSON error events are also emitted as canonical `acpx.event.v1` payloads with `type: "error"`.
+Hard rule for the ACP stream:
+
+- no acpx-specific event envelope,
+- no synthetic `type`/`stream` wrapper fields,
+- no ACP payload key renaming.
 
 ### Control-command JSON mapping
 
-When `--format json` is used, control commands emit canonical `acpx.event.v1` events:
+When `--format json` is used:
 
-- `prompt --no-wait`: `type: "prompt_queued"`
-- `sessions new`: `type: "session_ensured"` with `data.created: true`
-- `sessions ensure`: `type: "session_ensured"` with `data.created: true|false`
-- `sessions close`: `type: "session_closed"`
-- `cancel`: `type: "cancel_result"`
-- `set-mode`: `type: "mode_set"`
-- `set`: `type: "config_set"`
-- `status`: `type: "status_snapshot"`
+- commands that talk to an ACP adapter emit raw ACP JSON-RPC messages.
+- local query commands (`sessions list/show/history`) emit local JSON documents (not ACP stream traffic).
 
 ### Sessions/query command output behavior
 

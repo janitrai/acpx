@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
-import { createAcpxEvent, isAcpxEvent } from "./events.js";
-import { assertPersistedKeyPolicy } from "./persisted-key-policy.js";
+import { isAcpJsonRpcMessage } from "./acp-jsonrpc.js";
 import {
   DEFAULT_EVENT_MAX_SEGMENTS,
   DEFAULT_EVENT_SEGMENT_MAX_BYTES,
@@ -10,7 +9,7 @@ import {
   sessionEventSegmentPath as segmentEventPath,
 } from "./session-event-log.js";
 import { resolveSessionRecord, writeSessionRecord } from "./session-persistence.js";
-import type { AcpxEvent, AcpxEventDraft, SessionRecord } from "./types.js";
+import type { AcpJsonRpcMessage, SessionRecord } from "./types.js";
 
 const LOCK_RETRY_MS = 15;
 
@@ -36,7 +35,7 @@ async function statSize(filePath: string): Promise<number> {
   }
 }
 
-async function countExistingEventSegments(
+async function countExistingSegments(
   sessionId: string,
   maxSegments: number,
 ): Promise<number> {
@@ -63,7 +62,7 @@ async function resolveSessionMaxSegments(sessionId: string): Promise<number> {
       return configured;
     }
   } catch {
-    // Fall back to default when session metadata is unavailable.
+    // Fall back to defaults when metadata is unavailable.
   }
 
   return DEFAULT_EVENT_MAX_SEGMENTS;
@@ -150,7 +149,6 @@ export class SessionEventWriter {
   private readonly lock: LockHandle;
   private readonly maxSegmentBytes: number;
   private readonly maxSegments: number;
-  private nextSeq: number;
   private closed = false;
 
   private constructor(
@@ -162,7 +160,6 @@ export class SessionEventWriter {
     this.lock = lock;
     this.maxSegmentBytes = options.maxSegmentBytes;
     this.maxSegments = options.maxSegments;
-    this.nextSeq = record.lastSeq + 1;
   }
 
   static async open(
@@ -186,51 +183,34 @@ export class SessionEventWriter {
     return this.record;
   }
 
-  createEvent(draft: AcpxEventDraft): AcpxEvent {
-    const event = createAcpxEvent(
-      {
-        sessionId: this.record.acpxRecordId,
-        acpSessionId: this.record.acpSessionId,
-        agentSessionId: this.record.agentSessionId,
-        requestId: draft.request_id,
-        seq: this.nextSeq,
-      },
-      draft,
-    );
-    this.nextSeq += 1;
-    return event;
+  async appendMessage(
+    message: AcpJsonRpcMessage,
+    options: AppendOptions = {},
+  ): Promise<void> {
+    await this.appendMessages([message], options);
   }
 
-  async appendEvent(event: AcpxEvent, options: AppendOptions = {}): Promise<void> {
-    await this.appendEvents([event], options);
-  }
-
-  async appendEvents(events: AcpxEvent[], options: AppendOptions = {}): Promise<void> {
+  async appendMessages(
+    messages: AcpJsonRpcMessage[],
+    options: AppendOptions = {},
+  ): Promise<void> {
     if (this.closed) {
       throw new Error("SessionEventWriter is closed");
     }
 
-    if (events.length === 0) {
+    if (messages.length === 0) {
       return;
     }
 
     await ensureSessionDir();
     let activePath = activeEventPath(this.record.acpxRecordId);
 
-    for (const event of events) {
-      if (!isAcpxEvent(event)) {
-        throw new Error("Attempted to persist invalid acpx.event.v1 payload");
+    for (const message of messages) {
+      if (!isAcpJsonRpcMessage(message)) {
+        throw new Error("Attempted to persist invalid ACP JSON-RPC payload");
       }
 
-      if (event.seq !== this.record.lastSeq + 1) {
-        throw new Error(
-          `acpx event sequence mismatch: expected ${this.record.lastSeq + 1}, got ${event.seq}`,
-        );
-      }
-
-      assertPersistedKeyPolicy(event);
-
-      const line = `${JSON.stringify(event)}\n`;
+      const line = `${JSON.stringify(message)}\n`;
       const lineBytes = Buffer.byteLength(line);
       const currentSize = await statSize(activePath);
       if (currentSize > 0 && currentSize + lineBytes > this.maxSegmentBytes) {
@@ -240,21 +220,24 @@ export class SessionEventWriter {
 
       await fs.appendFile(activePath, line, "utf8");
 
-      this.record.lastSeq = event.seq;
-      if (event.seq >= this.nextSeq) {
-        this.nextSeq = event.seq + 1;
+      this.record.lastSeq += 1;
+      if (Object.hasOwn(message, "id")) {
+        const id = (message as { id?: unknown }).id;
+        if (typeof id === "string" || typeof id === "number") {
+          this.record.lastRequestId = String(id);
+        }
       }
-      this.record.lastRequestId = event.request_id ?? this.record.lastRequestId;
-      this.record.lastUsedAt = event.ts;
+      const writeTs = new Date().toISOString();
+      this.record.lastUsedAt = writeTs;
       this.record.eventLog = {
         active_path: activePath,
-        segment_count: await countExistingEventSegments(
+        segment_count: await countExistingSegments(
           this.record.acpxRecordId,
           this.maxSegments,
         ),
         max_segment_bytes: this.maxSegmentBytes,
         max_segments: this.maxSegments,
-        last_write_at: event.ts,
+        last_write_at: writeTs,
         last_write_error: null,
       };
     }
@@ -262,24 +245,6 @@ export class SessionEventWriter {
     if (options.checkpoint === true) {
       await writeSessionRecord(this.record);
     }
-  }
-
-  async appendDraft(
-    draft: AcpxEventDraft,
-    options: AppendOptions = {},
-  ): Promise<AcpxEvent> {
-    const event = this.createEvent(draft);
-    await this.appendEvent(event, options);
-    return event;
-  }
-
-  async appendDrafts(
-    drafts: AcpxEventDraft[],
-    options: AppendOptions = {},
-  ): Promise<AcpxEvent[]> {
-    const events = drafts.map((draft) => this.createEvent(draft));
-    await this.appendEvents(events, options);
-    return events;
   }
 
   async checkpoint(): Promise<void> {
@@ -305,7 +270,9 @@ export class SessionEventWriter {
   }
 }
 
-export async function listSessionEvents(sessionId: string): Promise<AcpxEvent[]> {
+export async function listSessionEvents(
+  sessionId: string,
+): Promise<AcpJsonRpcMessage[]> {
   const maxSegments = await resolveSessionMaxSegments(sessionId);
   const files: string[] = [];
 
@@ -321,14 +288,18 @@ export async function listSessionEvents(sessionId: string): Promise<AcpxEvent[]>
     files.push(active);
   }
 
-  const events: AcpxEvent[] = [];
+  const events: AcpJsonRpcMessage[] = [];
   for (const filePath of files) {
     const payload = await fs.readFile(filePath, "utf8");
     const lines = payload.split("\n").filter((line) => line.trim().length > 0);
     for (const line of lines) {
-      const parsed = JSON.parse(line);
-      if (isAcpxEvent(parsed)) {
-        events.push(parsed);
+      try {
+        const parsed = JSON.parse(line);
+        if (isAcpJsonRpcMessage(parsed)) {
+          events.push(parsed);
+        }
+      } catch {
+        // Skip malformed lines to keep event listing resilient.
       }
     }
   }

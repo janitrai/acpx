@@ -28,7 +28,7 @@ Canonical permanent reference for error behavior:
 
 ## Goals
 
-- Make `acpx` JSON output fully correlation-safe for orchestrators.
+- Make `acpx` JSON stream ACP-pure for orchestrators.
 - Make failures machine-readable in JSON mode across all layers (CLI, runtime, queue, ACP).
 - Make non-interactive permission behavior explicit and policy-driven.
 - Add idempotent session ensure flow for orchestrators.
@@ -54,24 +54,16 @@ Use a two-layer error contract (fully specified in `docs/ACPX_ERROR_STRATEGY.md`
 
 ## Required changes
 
-### 1. Correlation-safe JSON event envelope
+### 1. ACP-only JSON stream
 
-Current `--format json` events do not consistently carry session/request correlation fields.
+Current JSON output includes acpx-specific envelope/event objects.
 
-Add envelope fields to all JSON stream events:
+Replace that with strict ACP JSON-RPC stream behavior:
 
-- `eventVersion: 1`
-- `sessionId: string`
-- `requestId?: string`
-- `seq: number` (monotonic per request stream)
-- `stream: "prompt" | "control"`
-- existing payload-specific fields (`type`, `content`, `toolCallId`, etc.)
-
-Notes:
-
-- `requestId` is required for queue-owner submitted turns.
-- For direct (non-queued) local turn execution, `requestId` may be omitted.
-- `seq` resets per request stream.
+- `--format json --json-strict` stdout emits only raw ACP JSON-RPC messages.
+- no acpx-specific stream envelope fields (`eventVersion`, `sessionId`, `seq`, `stream`, custom `type`).
+- no ACP payload key renaming in stream messages.
+- local orchestration metadata stays out-of-band (checkpoint/state/status APIs), not in stream payloads.
 
 ### 2. General structured JSON error contract
 
@@ -211,7 +203,7 @@ Primary files:
 
 ### Phase 1 (MVP hardening)
 
-- JSON envelope (`eventVersion/sessionId/requestId/seq`)
+- ACP-only JSON stream contract
 - structured JSON errors
 - session ensure command
 
@@ -232,7 +224,7 @@ Primary files:
 
 Unit tests:
 
-- output formatter JSON envelope fields and sequence behavior
+- output formatter ACP pass-through behavior in JSON mode
 - structured error mapping from exit paths
 - normalization matrix (ACP `RequestError`, queue protocol errors, permission errors, usage errors)
 - ensure command path resolution (`created=true|false`)
@@ -257,9 +249,9 @@ Regression tests:
 
 ## Acceptance criteria
 
-- every JSON event in streamed prompt mode includes `eventVersion`, `sessionId`, and `seq`
-- queue-submitted turns include `requestId` on all events
-- JSON mode failures emit at least one structured `error` event before exit, with stable `code`
+- every JSON line in streamed prompt mode is a valid ACP JSON-RPC message
+- no acpx-specific envelope/event keys are emitted on ACP stream
+- JSON mode failures emit structured machine-readable diagnostics without violating JSON-only strict mode
 - auth-required failures include `detailCode=AUTH_REQUIRED` and preserve ACP payload when present
 - `sessions ensure` is idempotent and returns deterministic JSON
 - `--json-strict` enforces JSON-only output behavior
