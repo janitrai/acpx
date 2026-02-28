@@ -533,6 +533,7 @@ export class AcpClient {
     const result = await connection.newSession({
       cwd: asAbsoluteCwd(cwd),
       mcpServers: [],
+      ...(this.options.sessionMeta ? { _meta: this.options.sessionMeta } : {}),
     });
     return {
       sessionId: result.sessionId,

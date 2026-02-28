@@ -94,6 +94,7 @@ export type RunOnceOptions = {
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
+  sessionMeta?: Record<string, unknown>;
   outputFormatter: OutputFormatter;
   suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
@@ -107,6 +108,7 @@ export type SessionCreateOptions = {
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
+  sessionMeta?: Record<string, unknown>;
   verbose?: boolean;
 } & TimedRunOptions;
 
@@ -134,6 +136,7 @@ export type SessionEnsureOptions = {
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   authCredentials?: Record<string, string>;
   authPolicy?: AuthPolicy;
+  sessionMeta?: Record<string, unknown>;
   verbose?: boolean;
   walkBoundary?: string;
 } & TimedRunOptions;
@@ -785,6 +788,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
     nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
+    sessionMeta: options.sessionMeta,
     suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     verbose: options.verbose,
     onSessionUpdate: (notification) => output.onSessionUpdate(notification),
@@ -832,6 +836,7 @@ export async function createSession(
     nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
+    sessionMeta: options.sessionMeta,
     verbose: options.verbose,
   });
 
@@ -904,6 +909,7 @@ export async function ensureSession(
     nonInteractivePermissions: options.nonInteractivePermissions,
     authCredentials: options.authCredentials,
     authPolicy: options.authPolicy,
+    sessionMeta: options.sessionMeta,
     timeoutMs: options.timeoutMs,
     verbose: options.verbose,
   });
