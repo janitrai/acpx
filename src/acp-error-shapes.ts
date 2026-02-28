@@ -95,7 +95,8 @@ function isSessionNotFoundText(value: unknown): boolean {
     normalized.includes("resource_not_found") ||
     normalized.includes("resource not found") ||
     normalized.includes("session not found") ||
-    normalized.includes("unknown session")
+    normalized.includes("unknown session") ||
+    normalized.includes("invalid session identifier")
   );
 }
 
