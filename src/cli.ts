@@ -83,6 +83,8 @@ type GlobalFlags = PermissionFlags & {
   ttl: number;
   verbose?: boolean;
   format: OutputFormat;
+  sessionMeta?: string;
+  claudeAgent?: string;
 };
 
 type PromptFlags = {
@@ -315,7 +317,15 @@ function addGlobalFlags(command: Command): Command {
       "Queue owner idle TTL before shutdown (0 = keep alive forever) (default: 300)",
       parseTtlSeconds,
     )
-    .option("--verbose", "Enable verbose debug logs");
+    .option("--verbose", "Enable verbose debug logs")
+    .option(
+      "--session-meta <json>",
+      "JSON metadata to pass as _meta in newSession request",
+    )
+    .option(
+      "--claude-agent <name>",
+      "Agent name for claude-agent-acp (shorthand for --session-meta)",
+    );
 }
 
 function addSessionOption(command: Command): Command {
@@ -400,7 +410,62 @@ function resolveGlobalFlags(command: Command, config: ResolvedAcpxConfig): Globa
     approveAll: opts.approveAll ? true : undefined,
     approveReads: opts.approveReads ? true : undefined,
     denyAll: opts.denyAll ? true : undefined,
+    sessionMeta: opts.sessionMeta,
+    claudeAgent: opts.claudeAgent,
   };
+}
+
+function resolveSessionMeta(
+  globalFlags: GlobalFlags,
+): Record<string, unknown> | undefined {
+  let meta: Record<string, unknown> | undefined;
+
+  if (globalFlags.sessionMeta) {
+    try {
+      meta = JSON.parse(globalFlags.sessionMeta) as Record<string, unknown>;
+    } catch {
+      throw new InvalidArgumentError("--session-meta must be valid JSON");
+    }
+    if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+      throw new InvalidArgumentError("--session-meta must be a JSON object");
+    }
+  }
+
+  if (globalFlags.claudeAgent) {
+    const claudeMeta = {
+      claudeCode: { options: { agent: globalFlags.claudeAgent } },
+    };
+    meta = meta ? deepMerge(meta, claudeMeta) : claudeMeta;
+  }
+
+  return meta;
+}
+
+function deepMerge(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    const srcVal = source[key];
+    const tgtVal = result[key];
+    if (
+      typeof srcVal === "object" &&
+      srcVal !== null &&
+      !Array.isArray(srcVal) &&
+      typeof tgtVal === "object" &&
+      tgtVal !== null &&
+      !Array.isArray(tgtVal)
+    ) {
+      result[key] = deepMerge(
+        tgtVal as Record<string, unknown>,
+        srcVal as Record<string, unknown>,
+      );
+    } else {
+      result[key] = srcVal;
+    }
+  }
+  return result;
 }
 
 function resolveOutputPolicy(format: OutputFormat, jsonStrict: boolean): OutputPolicy {
@@ -786,6 +851,7 @@ async function handleExec(
     nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
+    sessionMeta: resolveSessionMeta(globalFlags),
     outputFormatter,
     suppressSdkConsoleErrors: outputPolicy.suppressSdkConsoleErrors,
     timeoutMs: globalFlags.timeout,
@@ -1050,6 +1116,7 @@ async function handleSessionsNew(
     nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
+    sessionMeta: resolveSessionMeta(globalFlags),
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
@@ -1086,6 +1153,7 @@ async function handleSessionsEnsure(
     nonInteractivePermissions: globalFlags.nonInteractivePermissions,
     authCredentials: config.auth,
     authPolicy: globalFlags.authPolicy,
+    sessionMeta: resolveSessionMeta(globalFlags),
     timeoutMs: globalFlags.timeout,
     verbose: globalFlags.verbose,
   });
