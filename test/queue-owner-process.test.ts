@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
-import { resolveQueueOwnerMainPath } from "../src/session-runtime/queue-owner-process.js";
+import { resolveQueueOwnerSpawnArgs } from "../src/session-runtime/queue-owner-process.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "acpx-queue-owner-path-"));
@@ -15,37 +15,22 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-describe("resolveQueueOwnerMainPath", () => {
-  it("resolves ../queue-owner-main.js when present", async () => {
+describe("resolveQueueOwnerSpawnArgs", () => {
+  it("returns <real cli path> and __queue-owner", async () => {
     await withTempDir(async (dir) => {
-      const sessionRuntimeDir = path.join(dir, "dist-test", "src", "session-runtime");
-      const queueOwnerMainPath = path.join(
-        dir,
-        "dist-test",
-        "src",
-        "queue-owner-main.js",
-      );
-      await mkdir(sessionRuntimeDir, { recursive: true });
-      await writeFile(queueOwnerMainPath, "// stub\n", "utf8");
-      const base = pathToFileURL(
-        path.join(sessionRuntimeDir, "queue-owner-process.js"),
-      ).href;
+      const cliFile = path.join(dir, "cli.js");
+      const cliLink = path.join(dir, "acpx-link.js");
+      await writeFile(cliFile, "// stub\n", "utf8");
+      await symlink(cliFile, cliLink);
 
-      const resolved = resolveQueueOwnerMainPath(base);
-      assert.equal(resolved, queueOwnerMainPath);
+      const args = resolveQueueOwnerSpawnArgs(["node", cliLink]);
+      assert.deepEqual(args, [realpathSync(cliLink), "__queue-owner"]);
     });
   });
 
-  it("falls back to ./queue-owner-main.js for bundled dist chunks", async () => {
-    await withTempDir(async (dir) => {
-      const distDir = path.join(dir, "dist");
-      const queueOwnerMainPath = path.join(distDir, "queue-owner-main.js");
-      await mkdir(distDir, { recursive: true });
-      await writeFile(queueOwnerMainPath, "// stub\n", "utf8");
-      const base = pathToFileURL(path.join(distDir, "chunk-abc.js")).href;
-
-      const resolved = resolveQueueOwnerMainPath(base);
-      assert.equal(resolved, queueOwnerMainPath);
+  it("throws when argv lacks an entry path", () => {
+    assert.throws(() => resolveQueueOwnerSpawnArgs(["node"]), {
+      message: "acpx self-spawn failed: missing CLI entry path",
     });
   });
 });

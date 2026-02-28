@@ -13,7 +13,7 @@
     "acpx": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsup src/cli.ts src/queue-owner-main.ts --format esm --dts --clean",
+    "build": "tsup src/cli.ts --format esm --dts --clean",
     "build:test": "node -e \"require('node:fs').rmSync('dist-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json",
     "test": "npm run build:test && node --test dist-test/test/*.test.js",
     "prepare": "husky",

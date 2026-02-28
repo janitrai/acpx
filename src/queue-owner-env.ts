@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import {
   runSessionQueueOwner,
   type QueueOwnerRuntimeOptions,
@@ -14,7 +12,7 @@ function asRecord(value: unknown): UnknownRecord | undefined {
   return value as UnknownRecord;
 }
 
-function parseQueueOwnerPayload(raw: string): QueueOwnerRuntimeOptions {
+export function parseQueueOwnerPayload(raw: string): QueueOwnerRuntimeOptions {
   const parsed = JSON.parse(raw) as unknown;
   const record = asRecord(parsed);
   if (!record) {
@@ -71,18 +69,11 @@ function parseQueueOwnerPayload(raw: string): QueueOwnerRuntimeOptions {
   return options;
 }
 
-async function main(): Promise<void> {
-  const payload = process.env.ACPX_QUEUE_OWNER_PAYLOAD;
+export async function runQueueOwnerFromEnv(env: NodeJS.ProcessEnv): Promise<void> {
+  const payload = env.ACPX_QUEUE_OWNER_PAYLOAD;
   if (!payload) {
     throw new Error("missing ACPX_QUEUE_OWNER_PAYLOAD");
   }
-
   const options = parseQueueOwnerPayload(payload);
   await runSessionQueueOwner(options);
 }
-
-void main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[acpx] queue owner failed: ${message}\n`);
-  process.exit(1);
-});

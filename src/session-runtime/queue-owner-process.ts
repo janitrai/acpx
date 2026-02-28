@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import type {
   AuthPolicy,
   NonInteractivePermissionPolicy,
@@ -29,23 +28,16 @@ type SessionSendLike = {
   ttlMs?: number;
 };
 
-export function resolveQueueOwnerMainPath(baseUrl: string = import.meta.url): string {
-  // In tsc output, queue-owner-process.js lives in `session-runtime/` and the
-  // entrypoint is `../queue-owner-main.js`. In tsup bundle output, this code is
-  // emitted into `dist/chunk-*.js`, so the entrypoint is `./queue-owner-main.js`.
-  const candidates = [
-    fileURLToPath(new URL("../queue-owner-main.js", baseUrl)),
-    fileURLToPath(new URL("./queue-owner-main.js", baseUrl)),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+export function resolveQueueOwnerSpawnArgs(
+  argv: readonly string[] = process.argv,
+): string[] {
+  const entry = argv[1];
+  if (!entry || entry.trim().length === 0) {
+    throw new Error("acpx self-spawn failed: missing CLI entry path");
   }
-  return candidates[0]!;
+  const resolvedEntry = realpathSync(entry);
+  return [resolvedEntry, "__queue-owner"];
 }
-
-const QUEUE_OWNER_MAIN_PATH = resolveQueueOwnerMainPath();
 
 export function queueOwnerRuntimeOptionsFromSend(
   options: SessionSendLike,
@@ -64,7 +56,7 @@ export function queueOwnerRuntimeOptionsFromSend(
 
 export function spawnQueueOwnerProcess(options: QueueOwnerRuntimeOptions): void {
   const payload = JSON.stringify(options);
-  const child = spawn(process.execPath, [QUEUE_OWNER_MAIN_PATH], {
+  const child = spawn(process.execPath, resolveQueueOwnerSpawnArgs(), {
     detached: true,
     stdio: "ignore",
     env: {

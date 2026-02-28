@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
 import { Command, CommanderError, InvalidArgumentError } from "commander";
-import { realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { findSkillsRoot, maybeHandleSkillflag } from "skillflag";
 import { listBuiltInAgents } from "./agent-registry.js";
 import {
@@ -76,6 +74,7 @@ import {
   type SessionAgentContent,
   type SessionUserContent,
 } from "./types.js";
+import { runQueueOwnerFromEnv } from "./queue-owner-env.js";
 
 class NoSessionError extends Error {
   constructor(message: string) {
@@ -1402,6 +1401,17 @@ async function runWithOutputPolicy<T>(
 }
 
 export async function main(argv: string[] = process.argv): Promise<void> {
+  if (argv[2] === "__queue-owner") {
+    try {
+      await runQueueOwnerFromEnv(process.env);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[acpx] queue owner failed: ${message}\n`);
+      process.exit(EXIT_CODES.ERROR);
+    }
+  }
+
   await maybeHandleSkillflag(argv, {
     skillsRoot: findSkillsRoot(import.meta.url),
     includeBundledSkill: false,
@@ -1534,24 +1544,4 @@ Examples:
       process.exit(exitCodeForOutputErrorCode(normalized.code));
     }
   });
-}
-
-function isCliEntrypoint(argv: string[]): boolean {
-  const entry = argv[1];
-  if (!entry) {
-    return false;
-  }
-
-  try {
-    // Resolve symlinks so global npm installs match (argv[1] is the
-    // symlink in node_modules/.bin, import.meta.url is the real path).
-    const resolved = pathToFileURL(realpathSync(entry)).href;
-    return import.meta.url === resolved;
-  } catch {
-    return false;
-  }
-}
-
-if (isCliEntrypoint(process.argv)) {
-  void main(process.argv);
 }
