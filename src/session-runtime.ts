@@ -399,6 +399,8 @@ async function runSessionPrompt(
     onAcpMessage: (_direction, message) => {
       sawAcpMessage = true;
       pendingMessages.push(message);
+    },
+    onAcpOutputMessage: (_direction, message) => {
       output.onAcpMessage(message);
     },
     onSessionUpdate: (notification) => {
@@ -587,7 +589,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
     authPolicy: options.authPolicy,
     suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
     verbose: options.verbose,
-    onAcpMessage: (_direction, message) => output.onAcpMessage(message),
+    onAcpOutputMessage: (_direction, message) => output.onAcpMessage(message),
   });
 
   try {

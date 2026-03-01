@@ -34,6 +34,7 @@ import {
   AuthPolicyError,
   PermissionPromptUnavailableError,
 } from "./errors.js";
+import { isSessionUpdateNotification } from "./acp-jsonrpc.js";
 import { FileSystemHandlers } from "./filesystem.js";
 import { classifyPermissionDecision, resolvePermissionRequest } from "./permissions.js";
 import { extractRuntimeSessionId } from "./runtime-session-id.js";
@@ -493,22 +494,16 @@ export class AcpClient {
     writable: WritableStream<AnyMessage>;
   } {
     const onAcpMessage = this.options.onAcpMessage;
+    const onAcpOutputMessage = this.options.onAcpOutputMessage;
 
-    if (!onAcpMessage) {
+    if (!onAcpMessage && !onAcpOutputMessage) {
       return base;
     }
 
     const shouldSuppressInboundReplaySessionUpdate = (message: AnyMessage): boolean => {
-      if (!this.suppressReplaySessionUpdateMessages) {
-        return false;
-      }
-      if (Object.hasOwn(message, "id")) {
-        return false;
-      }
-      if (!Object.hasOwn(message, "method")) {
-        return false;
-      }
-      return (message as { method?: unknown }).method === "session/update";
+      return (
+        this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message)
+      );
     };
 
     const readable = new ReadableStream<AnyMessage>({
@@ -524,7 +519,8 @@ export class AcpClient {
               continue;
             }
             if (!shouldSuppressInboundReplaySessionUpdate(value)) {
-              onAcpMessage("inbound", value);
+              onAcpOutputMessage?.("inbound", value);
+              onAcpMessage?.("inbound", value);
             }
             controller.enqueue(value);
           }
@@ -537,7 +533,8 @@ export class AcpClient {
 
     const writable = new WritableStream<AnyMessage>({
       async write(message) {
-        onAcpMessage("outbound", message);
+        onAcpOutputMessage?.("outbound", message);
+        onAcpMessage?.("outbound", message);
         const writer = base.writable.getWriter();
         try {
           await writer.write(message);

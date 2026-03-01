@@ -149,6 +149,10 @@ export type AcpClientOptions = {
   suppressSdkConsoleErrors?: boolean;
   verbose?: boolean;
   onAcpMessage?: (direction: AcpMessageDirection, message: AcpJsonRpcMessage) => void;
+  onAcpOutputMessage?: (
+    direction: AcpMessageDirection,
+    message: AcpJsonRpcMessage,
+  ) => void;
   onSessionUpdate?: (notification: SessionNotification) => void;
   onClientOperation?: (operation: ClientOperation) => void;
 };

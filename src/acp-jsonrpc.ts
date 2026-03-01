@@ -72,6 +72,21 @@ export function isAcpJsonRpcMessage(value: unknown): value is AnyMessage {
   return false;
 }
 
+export function isJsonRpcNotification(message: AnyMessage): boolean {
+  return (
+    Object.hasOwn(message, "method") &&
+    typeof (message as { method?: unknown }).method === "string" &&
+    !Object.hasOwn(message, "id")
+  );
+}
+
+export function isSessionUpdateNotification(message: AnyMessage): boolean {
+  return (
+    isJsonRpcNotification(message) &&
+    (message as { method?: unknown }).method === "session/update"
+  );
+}
+
 export function parsePromptStopReason(message: AnyMessage): string | undefined {
   if (!Object.hasOwn(message, "id") || !Object.hasOwn(message, "result")) {
     return undefined;

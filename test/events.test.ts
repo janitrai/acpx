@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isAcpJsonRpcMessage } from "../src/acp-jsonrpc.js";
+import {
+  isAcpJsonRpcMessage,
+  isSessionUpdateNotification,
+} from "../src/acp-jsonrpc.js";
 
 test("isAcpJsonRpcMessage accepts JSON-RPC request", () => {
   assert.equal(
@@ -110,4 +113,43 @@ test("isAcpJsonRpcMessage accepts request/notification/response fixtures after r
     const roundTripped = JSON.parse(JSON.stringify(fixture));
     assert.equal(isAcpJsonRpcMessage(roundTripped), true);
   }
+});
+
+test("isSessionUpdateNotification matches session/update notifications only", () => {
+  assert.equal(
+    isSessionUpdateNotification({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hello" },
+        },
+      },
+    }),
+    true,
+  );
+
+  assert.equal(
+    isSessionUpdateNotification({
+      jsonrpc: "2.0",
+      id: "req-1",
+      method: "session/prompt",
+      params: {
+        sessionId: "session-1",
+        prompt: [{ type: "text", text: "hello" }],
+      },
+    }),
+    false,
+  );
+
+  assert.equal(
+    isSessionUpdateNotification({
+      jsonrpc: "2.0",
+      id: "req-2",
+      result: { stopReason: "end_turn" },
+    }),
+    false,
+  );
 });
