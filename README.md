@@ -124,6 +124,7 @@ The only prerequisite is the underlying coding agent you want to use:
 - `acpx claude` -> Claude Code: https://claude.ai/code
 - `acpx gemini` -> Gemini CLI: https://github.com/google/gemini-cli
 - `acpx opencode` -> OpenCode: https://opencode.ai
+- `acpx kiro` -> Kiro CLI: https://kiro.dev
 - `acpx pi` -> Pi Coding Agent: https://github.com/mariozechner/pi
 
 ## Usage examples
