@@ -30,6 +30,7 @@ type MockAgentOptions = {
   loadSessionFailsOnEmpty: boolean;
   replayLoadSessionUpdates: boolean;
   loadReplayText: string;
+  ignoreSigterm: boolean;
 };
 
 type SessionState = {
@@ -257,6 +258,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
   let loadSessionFailsOnEmpty = false;
   let replayLoadSessionUpdates = false;
   let loadReplayText = "replayed load session update";
+  let ignoreSigterm = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -275,6 +277,11 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
     if (token === "--replay-load-session-updates") {
       supportsLoadSession = true;
       replayLoadSessionUpdates = true;
+      continue;
+    }
+
+    if (token === "--ignore-sigterm") {
+      ignoreSigterm = true;
       continue;
     }
 
@@ -313,6 +320,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
     loadSessionFailsOnEmpty,
     replayLoadSessionUpdates,
     loadReplayText,
+    ignoreSigterm,
   };
 }
 
@@ -603,6 +611,13 @@ const output = Writable.toWeb(process.stdout);
 const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 const stream = ndJsonStream(output, input);
 const mockAgentOptions = parseMockAgentOptions(process.argv.slice(2));
+
+if (mockAgentOptions.ignoreSigterm) {
+  process.on("SIGTERM", () => {
+    // Intentionally ignore to exercise ACP client SIGKILL fallback behavior.
+  });
+}
+
 new AgentSideConnection(
   (connection) => new MockAgent(connection, mockAgentOptions),
   stream,
