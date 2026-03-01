@@ -28,6 +28,8 @@ type MockAgentOptions = {
   loadSessionMeta?: Record<string, string>;
   supportsLoadSession: boolean;
   loadSessionFailsOnEmpty: boolean;
+  replayLoadSessionUpdates: boolean;
+  loadReplayText: string;
 };
 
 type SessionState = {
@@ -253,6 +255,8 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
   const loadSessionMeta: Record<string, string> = {};
   let supportsLoadSession = false;
   let loadSessionFailsOnEmpty = false;
+  let replayLoadSessionUpdates = false;
+  let loadReplayText = "replayed load session update";
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -265,6 +269,20 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
     if (token === "--load-session-fails-on-empty") {
       supportsLoadSession = true;
       loadSessionFailsOnEmpty = true;
+      continue;
+    }
+
+    if (token === "--replay-load-session-updates") {
+      supportsLoadSession = true;
+      replayLoadSessionUpdates = true;
+      continue;
+    }
+
+    if (token === "--load-replay-text") {
+      supportsLoadSession = true;
+      replayLoadSessionUpdates = true;
+      loadReplayText = parseOptionValue(argv, index + 1, token);
+      index += 1;
       continue;
     }
 
@@ -293,6 +311,8 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
       Object.keys(loadSessionMeta).length > 0 ? { ...loadSessionMeta } : undefined,
     supportsLoadSession,
     loadSessionFailsOnEmpty,
+    replayLoadSessionUpdates,
+    loadReplayText,
   };
 }
 
@@ -356,6 +376,10 @@ class MockAgent implements Agent {
     }
 
     this.sessions.set(params.sessionId, existing ?? { hasCompletedPrompt: false });
+
+    if (this.options.replayLoadSessionUpdates) {
+      await this.sendAssistantMessage(params.sessionId, this.options.loadReplayText);
+    }
 
     if (this.options.loadSessionMeta) {
       return {

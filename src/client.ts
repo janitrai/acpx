@@ -283,6 +283,7 @@ export class AcpClient {
   private observedSessionUpdates = 0;
   private processedSessionUpdates = 0;
   private suppressSessionUpdates = false;
+  private suppressReplaySessionUpdateMessages = false;
   private activePrompt?: {
     sessionId: string;
     promise: Promise<PromptResponse>;
@@ -497,6 +498,19 @@ export class AcpClient {
       return base;
     }
 
+    const shouldSuppressInboundReplaySessionUpdate = (message: AnyMessage): boolean => {
+      if (!this.suppressReplaySessionUpdateMessages) {
+        return false;
+      }
+      if (Object.hasOwn(message, "id")) {
+        return false;
+      }
+      if (!Object.hasOwn(message, "method")) {
+        return false;
+      }
+      return (message as { method?: unknown }).method === "session/update";
+    };
+
     const readable = new ReadableStream<AnyMessage>({
       async start(controller) {
         const reader = base.readable.getReader();
@@ -509,7 +523,9 @@ export class AcpClient {
             if (!value) {
               continue;
             }
-            onAcpMessage("inbound", value);
+            if (!shouldSuppressInboundReplaySessionUpdate(value)) {
+              onAcpMessage("inbound", value);
+            }
             controller.enqueue(value);
           }
         } finally {
@@ -561,8 +577,11 @@ export class AcpClient {
   ): Promise<SessionLoadResult> {
     const connection = this.getConnection();
     const previousSuppression = this.suppressSessionUpdates;
+    const previousReplaySuppression = this.suppressReplaySessionUpdateMessages;
     this.suppressSessionUpdates =
       previousSuppression || Boolean(options.suppressReplayUpdates);
+    this.suppressReplaySessionUpdateMessages =
+      previousReplaySuppression || Boolean(options.suppressReplayUpdates);
 
     let response: LoadSessionResponse | undefined;
 
@@ -579,6 +598,7 @@ export class AcpClient {
       );
     } finally {
       this.suppressSessionUpdates = previousSuppression;
+      this.suppressReplaySessionUpdateMessages = previousReplaySuppression;
     }
 
     return {
@@ -730,6 +750,7 @@ export class AcpClient {
     this.observedSessionUpdates = 0;
     this.processedSessionUpdates = 0;
     this.suppressSessionUpdates = false;
+    this.suppressReplaySessionUpdateMessages = false;
     this.activePrompt = undefined;
     this.cancellingSessionIds.clear();
     this.promptPermissionFailures.clear();

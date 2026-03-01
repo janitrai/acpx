@@ -19,6 +19,43 @@ type CliRunResult = {
   stderr: string;
 };
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function extractAgentMessageChunkText(
+  message: Record<string, unknown>,
+): string | undefined {
+  if (message.method !== "session/update") {
+    return undefined;
+  }
+
+  const params = asRecord(message.params);
+  const update = asRecord(params?.update);
+  const content = asRecord(update?.content);
+  if (
+    update?.sessionUpdate !== "agent_message_chunk" ||
+    content?.type !== "text" ||
+    typeof content.text !== "string"
+  ) {
+    return undefined;
+  }
+
+  return content.text;
+}
+
+function extractJsonRpcId(
+  message: Record<string, unknown>,
+): string | number | undefined {
+  if (typeof message.id === "string" || typeof message.id === "number") {
+    return message.id;
+  }
+  return undefined;
+}
+
 function parseJsonRpcOutputLines(stdout: string): Array<Record<string, unknown>> {
   const lines = stdout
     .split("\n")
@@ -465,6 +502,112 @@ test("integration: prompt recovers when loadSession fails on empty session", asy
       );
       assert.equal(closed.code, 0, closed.stderr);
     } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+test("integration: load replay session/update notifications are suppressed from output and event log", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-integration-cwd-"));
+    const replayText = "replay-load-chunk";
+    const freshText = "fresh-after-load";
+    const replayLoadAgentCommand =
+      `${MOCK_AGENT_COMMAND} --supports-load-session ` +
+      `--replay-load-session-updates --load-replay-text ${replayText}`;
+    const replayAgentArgs = [
+      "--agent",
+      replayLoadAgentCommand,
+      "--approve-all",
+      "--cwd",
+      cwd,
+    ];
+    let sessionId: string | undefined;
+
+    try {
+      const created = await runCli(
+        [...replayAgentArgs, "--format", "json", "sessions", "new"],
+        homeDir,
+      );
+      assert.equal(created.code, 0, created.stderr);
+      const createdPayload = JSON.parse(created.stdout.trim()) as {
+        acpxRecordId?: string;
+      };
+      sessionId = createdPayload.acpxRecordId;
+      assert.equal(typeof sessionId, "string");
+
+      const prompt = await runCli(
+        [...replayAgentArgs, "--format", "json", "prompt", `echo ${freshText}`],
+        homeDir,
+      );
+      assert.equal(prompt.code, 0, prompt.stderr);
+
+      const outputMessages = parseJsonRpcOutputLines(prompt.stdout);
+      const outputChunkTexts = outputMessages
+        .map((message) => extractAgentMessageChunkText(message))
+        .filter((text): text is string => typeof text === "string");
+
+      assert.equal(outputChunkTexts.includes(replayText), false, prompt.stdout);
+      assert.equal(outputChunkTexts.includes(freshText), true, prompt.stdout);
+
+      const loadRequest = outputMessages.find((message) => {
+        return (
+          message.method === "session/load" && extractJsonRpcId(message) !== undefined
+        );
+      });
+      assert(loadRequest, `expected session/load request in output:\n${prompt.stdout}`);
+
+      const loadRequestId = extractJsonRpcId(loadRequest);
+      assert.notEqual(loadRequestId, undefined);
+      assert.equal(
+        outputMessages.some(
+          (message) =>
+            extractJsonRpcId(message) === loadRequestId &&
+            Object.hasOwn(message, "result"),
+        ),
+        true,
+        prompt.stdout,
+      );
+
+      const recordPath = path.join(
+        homeDir,
+        ".acpx",
+        "sessions",
+        `${encodeURIComponent(sessionId as string)}.json`,
+      );
+      const storedRecord = JSON.parse(await fs.readFile(recordPath, "utf8")) as {
+        event_log?: {
+          active_path?: string;
+        };
+      };
+      const activeEventPath = storedRecord.event_log?.active_path;
+      assert.equal(typeof activeEventPath, "string");
+
+      const eventLog = await fs.readFile(activeEventPath as string, "utf8");
+      const eventMessages = eventLog
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const eventChunkTexts = eventMessages
+        .map((message) => extractAgentMessageChunkText(message))
+        .filter((text): text is string => typeof text === "string");
+
+      assert.equal(eventChunkTexts.includes(replayText), false, eventLog);
+      assert.equal(eventChunkTexts.includes(freshText), true, eventLog);
+    } finally {
+      if (sessionId) {
+        const lock = await readQueueOwnerLock(homeDir, sessionId).catch(
+          () => undefined,
+        );
+        await runCli(
+          [...replayAgentArgs, "--format", "json", "sessions", "close"],
+          homeDir,
+        );
+        if (lock) {
+          await waitForPidExit(lock.pid, 5_000);
+        }
+      }
       await fs.rm(cwd, { recursive: true, force: true });
     }
   });
