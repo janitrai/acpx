@@ -207,6 +207,8 @@ acpx [global_options] set-mode <mode> [-s <name>]   # defaults to codex
 Behavior:
 
 - Calls ACP `session/set_mode`.
+- `<mode>` values are adapter-defined (not globally standardized across all ACP adapters).
+- Unsupported mode ids are rejected by the adapter (often as `Invalid params`).
 - Routes through queue-owner IPC when an owner is active.
 - Falls back to a direct client reconnect when no owner is running.
 

@@ -137,7 +137,7 @@ acpx codex --file prompt.md                    # prompt from file
 acpx codex --file - "extra context"            # explicit stdin + appended args
 acpx codex --no-wait 'draft test migration plan' # enqueue without waiting if session is busy
 acpx codex cancel                               # cooperative cancel of in-flight prompt
-acpx codex set-mode plan                        # session/set_mode
+acpx codex set-mode auto                        # session/set_mode (adapter-defined mode id)
 acpx codex set approval_policy conservative     # session/set_config_option
 acpx exec 'summarize this repo'                # default agent shortcut (codex)
 acpx codex exec 'what does this repo do?'      # one-shot, no saved session
@@ -297,6 +297,7 @@ acpx --agent ./my-custom-acp-server 'do something'
 - `--no-wait` submits to that queue and returns immediately.
 - `cancel` sends cooperative `session/cancel` to the running queue owner process and returns success when no prompt is running (`nothing to cancel`).
 - `set-mode` and `set` route through queue-owner IPC when active, otherwise they reconnect directly to apply `session/set_mode` and `session/set_config_option`.
+- `<mode>` values for `set-mode` are adapter-defined; unsupported values are rejected by the adapter (commonly `Invalid params`).
 - `exec` is always one-shot and does not reuse saved sessions.
 - Session metadata is stored under `~/.acpx/sessions/`.
 - Each successful prompt appends lightweight turn history previews (`role`, `timestamp`, `textPreview`) to session metadata.

@@ -131,7 +131,7 @@ Behavior:
 
 ```bash
 acpx codex cancel
-acpx codex set-mode plan
+acpx codex set-mode auto
 acpx codex set approval_policy conservative
 ```
 
@@ -139,6 +139,7 @@ Behavior:
 
 - `cancel`: sends cooperative `session/cancel` through queue-owner IPC.
 - `set-mode`: calls ACP `session/set_mode`.
+- `set-mode` mode ids are adapter-defined; unsupported values are rejected by the adapter (often `Invalid params`).
 - `set`: calls ACP `session/set_config_option`.
 - `set-mode`/`set` route through queue-owner IPC when active, otherwise reconnect directly.
 
