@@ -74,6 +74,7 @@ import {
   type SessionAgentContent,
   type SessionUserContent,
 } from "./types.js";
+import { getAcpxVersion } from "./version.js";
 import { runQueueOwnerFromEnv } from "./queue-owner-env.js";
 
 class NoSessionError extends Error {
@@ -1433,6 +1434,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   program
     .name("acpx")
     .description("Headless CLI client for the Agent Client Protocol")
+    .version(getAcpxVersion())
     .enablePositionalOptions()
     .showHelpAfterError();
 
