@@ -31,8 +31,49 @@ jobs:
       - run: git config user.name "github-actions[bot]"
       - run: git config user.email "github-actions[bot]@users.noreply.github.com"
       - run: npm ci
+      - name: Validate package metadata for trusted publishing
+        run: |
+          node - <<'NODE'
+          const { readFileSync } = require("node:fs");
+
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const expectedAuthor = "OpenClaw Team <dev@openclaw.ai>";
+          const expectedRepoUrl = "https://github.com/openclaw/acpx";
+
+          const normalizeRepoUrl = (value) =>
+            String(value ?? "")
+              .trim()
+              .replace(/^git\+/, "")
+              .replace(/\.git$/i, "")
+              .replace(/\/+$/, "");
+
+          const actualRepoUrl = normalizeRepoUrl(pkg?.repository?.url);
+          const expectedRepoUrlNormalized = normalizeRepoUrl(expectedRepoUrl);
+
+          const errors = [];
+          if (actualRepoUrl !== expectedRepoUrlNormalized) {
+            errors.push(
+              `package.json repository.url must resolve to ${expectedRepoUrlNormalized}; found ${actualRepoUrl || "<missing>"}`
+            );
+          }
+          if ((pkg?.author ?? "") !== expectedAuthor) {
+            errors.push(
+              `package.json author must be exactly "${expectedAuthor}"; found "${pkg?.author ?? ""}"`
+            );
+          }
+
+          if (errors.length > 0) {
+            for (const err of errors) {
+              console.error(err);
+            }
+            process.exit(1);
+          }
+
+          console.log("Package metadata validated.");
+          NODE
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run build
       # Fetch latest version from npm, bump it, write to package.json.
       # Nothing is committed — the bumped version lives only in the CI
       # runner's working directory. release-it tags + publishes from it.
